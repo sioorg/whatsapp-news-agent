@@ -13,10 +13,14 @@ services:
     environment:
       CHECKPOINT_DB: /data/checkpoints.sqlite
 
-    # Bound to loopback: nginx is the only thing that should reach this
-    # directly. Drop the 127.0.0.1 prefix only if you want it exposed.
+    # Loopback only. cloudflared reaches the app over the shared Docker
+    # network, not through this binding — it exists so you can curl
+    # localhost:8000/health on the host while debugging.
     ports:
       - "127.0.0.1:8000:8000"
+
+    networks:
+      - edge
 
     # Survives container replacement; holds the conversation store.
     volumes:
@@ -37,3 +41,17 @@ services:
 
 volumes:
   agent-data:
+
+networks:
+  # Shared with the cloudflared container so it can reach this service by
+  # name. The default bridge network has no DNS, so this is required, not
+  # optional. On the host, once:
+  #
+  #   docker network create edge
+  #   docker network connect edge cloudflared-tunnel
+  #
+  # Attaching rather than replacing keeps cloudflared on the default bridge,
+  # where its existing 172.17.0.1 routes to host-published ports still work.
+  edge:
+    external: true
+    name: edge
