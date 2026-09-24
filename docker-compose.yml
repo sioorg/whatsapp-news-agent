@@ -1,0 +1,39 @@
+services:
+  agent:
+    build: .
+    image: whatsapp-news-agent:latest
+    container_name: whatsapp-news-agent
+    restart: unless-stopped
+
+    # Secrets stay out of the image and out of git.
+    env_file: .env
+
+    # Overrides .env: the store must live on the mounted volume, not in the
+    # container's ephemeral filesystem.
+    environment:
+      CHECKPOINT_DB: /data/checkpoints.sqlite
+
+    # Bound to loopback: nginx is the only thing that should reach this
+    # directly. Drop the 127.0.0.1 prefix only if you want it exposed.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # Survives container replacement; holds the conversation store.
+    volumes:
+      - agent-data:/data
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  agent-data:

@@ -1,0 +1,14 @@
+# Secrets — never commit
+.env
+.env.local
+
+# Local environment
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Conversation store and other runtime state
+data/
+*.sqlite
+*.sqlite3

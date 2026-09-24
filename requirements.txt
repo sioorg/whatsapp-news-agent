@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pydantic
+
+langgraph
+langgraph-checkpoint-sqlite
+langchain-core
+langchain-groq
+langchain-anthropic
+
+tavily-python
+twilio
