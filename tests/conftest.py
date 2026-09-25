@@ -9,6 +9,15 @@ These are dummy values — the suite never calls a real API.
 
 import os
 
+from dotenv import load_dotenv
+
+# Load .env before the defaults below. setdefault never overwrites, so real
+# credentials win where they exist and dummies fill the gaps. Without this,
+# the dummies would clobber .env and the integration tests could never
+# authenticate. In CI there is no .env, so everything falls through to the
+# dummy values — or to the real secrets the eval workflow injects as env vars.
+load_dotenv()
+
 os.environ.setdefault("LLM_PROVIDER", "groq")
 os.environ.setdefault("GROQ_API_KEY", "test-groq-key")
 os.environ.setdefault("TAVILY_API_KEY", "test-tavily-key")

@@ -1,6 +1,11 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# Real-API tests are excluded by default so a bare `pytest` stays free and
+# fast. Run them with: pytest -m integration
+addopts = "-q --strict-markers -m 'not integration'"
+markers = [
+    "integration: calls real APIs; costs money and needs credentials",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:starlette.*",
 ]
