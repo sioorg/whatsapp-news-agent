@@ -25,6 +25,7 @@ jobs:
     with:
       deploy-dir: /home/mysio/my-apps/whatsapp-news-agent
       health-url: http://127.0.0.1:8000/health
+    secrets: inherit
 
   # Layers 3-4: real API calls. Nightly only, never gates a merge.
   eval:
