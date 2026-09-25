@@ -23,7 +23,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     uses: siopinto/ci-workflows/.github/workflows/docker-deploy.yml@v1
     with:
-      deploy-dir: /home/mysio/whatsapp-news-agent
+      deploy-dir: /home/mysio/my-apps/whatsapp-news-agent
       health-url: http://127.0.0.1:8000/health
 
   # Layers 3-4: real API calls. Nightly only, never gates a merge.
