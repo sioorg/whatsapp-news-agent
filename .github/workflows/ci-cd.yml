@@ -14,14 +14,14 @@ jobs:
   # Layers 1-2: mocked and replayed. Free, fast, gates every merge.
   test:
     if: github.event_name != 'schedule'
-    uses: siopinto/ci-workflows/.github/workflows/python-test.yml@v1
+    uses: sioorg/ci-workflows/.github/workflows/python-test.yml@v1
     with:
       python-version: "3.12"
 
   deploy:
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    uses: siopinto/ci-workflows/.github/workflows/docker-deploy.yml@v1
+    uses: sioorg/ci-workflows/.github/workflows/docker-deploy.yml@v1
     with:
       deploy-dir: /home/mysio/my-apps/whatsapp-news-agent
       health-url: http://127.0.0.1:8000/health
@@ -29,5 +29,5 @@ jobs:
   # Layers 3-4: real API calls. Nightly only, never gates a merge.
   eval:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    uses: siopinto/ci-workflows/.github/workflows/agent-eval.yml@v1
+    uses: sioorg/ci-workflows/.github/workflows/agent-eval.yml@v1
     secrets: inherit
