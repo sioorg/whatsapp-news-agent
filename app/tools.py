@@ -1,11 +1,17 @@
-"""Tavily-backed search tools exposed to the LangGraph agent."""
+"""Search tools exposed to the LangGraph agent: local knowledge first, then
+Tavily for the web. See app.agent for how a question is routed to one, the
+other, or both, and app.rag for the local store itself."""
 
+import logging
 from functools import lru_cache
 
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
+from app import rag
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -33,6 +39,51 @@ def _format(results: list[dict]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def _cache_quietly(results: list[dict]) -> None:
+    """Feed a successful search into the local store. Caching is a bonus,
+    never a requirement — a hiccup here must not turn a good search result
+    into a failed tool call."""
+
+    try:
+        rag.cache_search_results(results)
+    except Exception:
+        logger.exception("failed to cache search results locally")
+
+
+def _format_rag(hits: list) -> str:
+    if not hits:
+        return "No results found in local knowledge base."
+
+    blocks = []
+    for hit in hits:
+        value = hit.value
+        header = f"Title: {value.get('title') or 'Untitled'}"
+        published = value.get("published", "")
+        if published:
+            header += f"\nPublished: {published}"
+
+        blocks.append(
+            f"{header}\n"
+            f"URL: {value.get('source', '')}\n"
+            f"Content: {value.get('text', '')[:600]}"
+        )
+
+    return "\n\n---\n\n".join(blocks)
+
+
+@tool
+def rag_search(query: str) -> str:
+    """Search previously fetched news and any manually ingested documents.
+
+    Instant and free, unlike news_search/web_search — try this first for
+    anything that might already be covered: a follow-up question, something
+    likely searched before, or general background. Falls back to an empty
+    result (not an error) if the local store has nothing relevant yet.
+    """
+
+    return _format_rag(rag.search(query))
+
+
 @tool
 def news_search(query: str) -> str:
     """Search recent news articles for a topic.
@@ -49,7 +100,9 @@ def news_search(query: str) -> str:
         include_answer=False,
     )
 
-    return _format(response.get("results", []))
+    results = response.get("results", [])
+    _cache_quietly(results)
+    return _format(results)
 
 
 @tool
@@ -67,7 +120,9 @@ def web_search(query: str) -> str:
         include_answer=False,
     )
 
-    return _format(response.get("results", []))
+    results = response.get("results", [])
+    _cache_quietly(results)
+    return _format(results)
 
 
-TOOLS = [news_search, web_search]
+TOOLS = [rag_search, news_search, web_search]

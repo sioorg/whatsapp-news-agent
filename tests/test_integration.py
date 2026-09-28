@@ -92,3 +92,38 @@ def test_conversation_memory_works_across_turns():
     reply = answer("What is my name? Do not search.", thread_id="ci-memory")
 
     assert "ci bot" in reply.lower()
+
+
+def test_a_repeated_question_is_answered_from_the_local_cache():
+    """Proves the router + rag_search loop end to end, with a real
+    embedding model and a real router classification — not just the stubs
+    in tests/test_agent.py and tests/test_rag.py.
+
+    The first ask hits the web (and auto-caches the results, see
+    app.tools). A second, fresh thread asking the same thing has no
+    conversation memory of the first — so any use of rag_search on it can
+    only be the shared local cache the first call just populated.
+    """
+
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from app.agent import build_graph
+
+    query = "What is the latest news about the James Webb Space Telescope?"
+    config = {"recursion_limit": 12}
+
+    first = build_graph().invoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={**config, "configurable": {"thread_id": "ci-rag-first"}},
+    )
+    first_tools = {m.name for m in first["messages"] if isinstance(m, ToolMessage)}
+    assert first_tools & {"news_search", "web_search"}, "first ask should hit the web"
+
+    second = build_graph().invoke(
+        {"messages": [HumanMessage(content=query)]},
+        config={**config, "configurable": {"thread_id": "ci-rag-second"}},
+    )
+    second_tools = {m.name for m in second["messages"] if isinstance(m, ToolMessage)}
+    assert "rag_search" in second_tools, (
+        "a repeated question should hit the local cache, not just the web again"
+    )

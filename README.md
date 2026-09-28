@@ -1,14 +1,19 @@
 # WhatsApp News Agent
 
 A LangGraph agent that answers news questions over WhatsApp. Inbound messages
-arrive via a webhook, the agent searches Tavily for recent articles, and the
-reply is delivered back to the sender.
+arrive via a webhook; a router first decides whether the question can be
+answered from a local knowledge base, needs a live Tavily search, or both;
+the reply is delivered back to the sender.
 
 ```
 WhatsApp ──▶ Meta Cloud API ──▶ POST /webhook/meta ──▶ LangGraph agent
                                       │                     │
-                               (200 immediately)      news_search / web_search
-                                                         (Tavily)
+                               (200 immediately)         route (rag/web/both)
+                                                             │
+                                                    rag_search (local, free)
+                                                    news_search / web_search
+                                                         (Tavily — also
+                                                          caches into rag)
                                                              │
 WhatsApp ◀── Graph API send ◀──── background task ◀──────────┘
 ```
@@ -27,12 +32,14 @@ switch to misconfigure:
 | --- | --- |
 | [app/config.py](app/config.py) | Env-backed settings, resolved once at import |
 | [app/llm.py](app/llm.py) | Chat model factory — Groq or Anthropic |
-| [app/tools.py](app/tools.py) | Tavily `news_search` and `web_search` tools |
-| [app/agent.py](app/agent.py) | LangGraph graph + per-sender conversation memory |
+| [app/rag.py](app/rag.py) | Local knowledge store — LangGraph `SqliteStore` + local embeddings |
+| [app/tools.py](app/tools.py) | `rag_search` (local) and Tavily's `news_search`/`web_search` |
+| [app/agent.py](app/agent.py) | LangGraph graph — router + agent/tools loop + per-sender memory |
 | [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both connectors |
 | [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send, payload parsing, HMAC signature |
 | [app/connectors/twilio_whatsapp.py](app/connectors/twilio_whatsapp.py) | Twilio send, form parsing, signature |
-| [app/main.py](app/main.py) | FastAPI webhooks and `/chat` test endpoint |
+| [app/main.py](app/main.py) | FastAPI webhooks, `/chat` test endpoint, RAG model warm-up |
+| [scripts/ingest_docs.py](scripts/ingest_docs.py) | CLI to add your own `.txt`/`.md`/`.pdf` files to the knowledge base |
 
 ## Code flow
 
@@ -45,8 +52,16 @@ switch to misconfigure:
                  │
                  ▼
           ┌─────────────┐
-          │    agent    │   call_model()  — agent.py:43
-          │             │   invokes the LLM at agent.py:45
+          │    route    │   route_query()  — agent.py:121
+          │             │   classifies rag / web / both — agent.py:138
+          └──────┬──────┘
+                 │  sets state["route"]; decided once per user
+                 │  message, unchanged across this turn's tool calls
+                 ▼
+          ┌─────────────┐
+          │    agent    │   call_model()  — agent.py:147
+          │             │   invokes the LLM at agent.py:150, but only
+          │             │   offers it ROUTE_TOOLS[route] — see agent.py:79
           └──┬───────┬──┘
              │       │
  tool_calls  │       │  no tool_calls
@@ -55,17 +70,21 @@ switch to misconfigure:
        ┌─────────┐  ┌─────┐
        │  tools  │  │ END │
        └────┬────┘  └─────┘
-            │        ToolNode(TOOLS) runs
-            │        news_search / web_search
+            │        ToolNode(TOOLS) — always holds all 3 tools regardless
+            │        of route (agent.py:168): it only executes whatever the
+            │        model actually called, never chooses on its own
+            │        rag_search / news_search / web_search
             └────────────┐
                          │  results appended as a ToolMessage
                          ▼
                     back to agent
 ```
 
-Wiring lives in [`build_graph()`](app/agent.py#L38). The branch is
-`tools_condition`, a LangGraph prebuilt: it inspects the last message and routes
-to `tools` if it carries tool calls, otherwise to `END`.
+Wiring lives in [`build_graph()`](app/agent.py#L116). The branch after `agent`
+is `tools_condition`, a LangGraph prebuilt: it inspects the last message and
+routes to `tools` if it carries tool calls, otherwise to `END`. `route` itself
+is unconditional — every turn passes through it exactly once, before `agent`
+ever runs.
 
 ### One turn, step by step
 
@@ -74,42 +93,61 @@ LangGraph invokes it. Same pattern as a FastAPI route handler. Compiling the
 graph runs nothing; `graph.invoke()` is what starts the engine.
 
 ```
-answer(text, thread_id)                                   agent.py:63
-  └─ graph.invoke({"messages": [HumanMessage]})           agent.py:70
+answer(text, thread_id)                                   agent.py:179
+  └─ graph.invoke({"messages": [HumanMessage]})           agent.py:186
        │
        │  LangGraph engine takes over
        │
+       ├─ visit 0 ─▶ route_query(state)        state = [Human]
+       │               └─ llm.with_structured_output(Route).invoke(...)
+       │                    ◀── Route(choice="web")
+       │               state["route"] = "web"
+       │
        ├─ visit 1 ─▶ call_model(state)         state = [Human]
-       │               └─ llm_with_tools.invoke([system, *messages])
+       │               └─ llm.bind_tools([news_search, web_search]).invoke(...)
        │                    ◀── AIMessage(tool_calls=['news_search'])
        │
-       ├─ route ──▶ tools
-       │               └─ news_search("...") ─▶ Tavily API
+       ├─ tools_condition ──▶ tools
+       │               └─ news_search("...") ─▶ Tavily API, then caches
+       │                    the results into app/rag.py for next time
        │                    ◀── ToolMessage (~4k chars of articles)
        │
        ├─ visit 2 ─▶ call_model(state)         state = [Human, AI, Tool]
-       │               └─ llm_with_tools.invoke([system, *messages])
+       │               └─ llm.bind_tools([news_search, web_search]).invoke(...)
        │                    ◀── AIMessage(content="Here's the latest…")
        │
        └─ no tool_calls ─▶ END, invoke() returns
 ```
 
-Two LLM calls for a single question: one to choose the search, one to write the
-answer from the results. A third happens when the model searches twice before
-answering.
+Three LLM calls for a single question that needs a fresh search: one to
+classify the route, one to choose the search, one to write the answer. A
+fourth happens if the model searches twice before answering. A question the
+router sends down `"rag"` only ever offers `rag_search`, so it can finish in
+two LLM calls if the local store already has an answer.
 
 Key points that are easy to miss:
 
-- **[agent.py:45](app/agent.py#L45) is the only place the LLM is invoked.** It
-  runs more than once per turn because LangGraph re-enters the same function
-  after each tool call.
+- **Two different LLM calls happen every turn, not one.**
+  [agent.py:138](app/agent.py#L138) classifies the question before anything
+  else runs; [agent.py:150](app/agent.py#L150) is the one that actually
+  answers or picks a tool, and — like before — runs more than once per turn
+  because LangGraph re-enters `call_model` after each tool call.
+- **The route is decided once per turn, not once per tool round-trip.**
+  `route_query` only sits between `START` and `agent`
+  ([agent.py:170](app/agent.py#L170)); once a route is chosen, every
+  re-entry into `call_model` within that same turn reuses it, even across
+  several tool calls in a row.
+- **A broken router fails open, never closed.** If the classification call
+  itself errors, `route_query` falls back to `"both"`
+  ([agent.py:142](app/agent.py#L142)) — offering every tool — rather than
+  ever silently restricting what the model can reach.
 - **Tavily output goes to the LLM, never to the user.** The `ToolMessage` is
   merged into state by the `add_messages` reducer, so visit 2 sees the raw
   articles as context and summarizes them. The user only ever receives
   LLM-written text.
 - **`state` is supplied by LangGraph**, not built by you. Visit 1 receives one
   message, visit 2 receives three.
-- **`recursion_limit=12`** ([agent.py:74](app/agent.py#L74)) caps the
+- **`recursion_limit=12`** ([agent.py:190](app/agent.py#L190)) caps the
   agent↔tools loop so a confused model cannot search forever.
 
 ### Tracing it yourself
@@ -126,6 +164,67 @@ for m in r['messages']:
     m.pretty_print()
 "
 ```
+
+## Local knowledge base (router + RAG)
+
+A shared store — not per-sender, unlike the conversation checkpointer —
+that everyone's searches feed into and everyone's questions can draw from.
+Backed by LangGraph's own `SqliteStore` (see [app/rag.py](app/rag.py)),
+which already depends on `sqlite-vec` via `langgraph-checkpoint-sqlite`, so
+this needs no separate database service. Embeddings run locally via
+[fastembed](https://github.com/qdrant/fastembed) (ONNX, CPU-only) — no API
+key, no per-call cost, and far lighter than a torch-based alternative.
+
+**What fills it:**
+
+- Every successful `news_search`/`web_search` result, automatically. A
+  caching failure is logged and swallowed — it can never turn a good search
+  result into a failed reply (see `_cache_quietly` in
+  [app/tools.py](app/tools.py)).
+- Whatever you add by hand:
+
+  ```bash
+  PYTHONPATH=. .venv/bin/python scripts/ingest_docs.py notes.md report.pdf
+  ```
+
+  Point `RAG_DB_PATH` at the same file the running app uses (in Docker,
+  that's the path already set in `docker-compose.yml`) — otherwise you're
+  populating a database nothing reads from.
+
+**How the router decides what to offer:** every turn, before `call_model`
+runs, a small LLM call classifies the latest message as `rag` (likely
+already covered — a follow-up, or something you'd expect to have searched
+before), `web` (clearly needs fresh information — "latest", "today",
+"breaking"), or `both` (unsure). That classification constrains which tools
+`call_model` can reach for the rest of the turn — see `ROUTE_TOOLS` in
+[app/agent.py](app/agent.py). `ToolNode` itself always holds every tool
+regardless, so this only ever narrows what the model is *offered*, never
+what it's capable of running if it already called something.
+
+**Config** (see `.env.example`):
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `RAG_DB_PATH` | *(empty)* | SQLite file path. Empty = in-memory, lost on restart |
+| `RAG_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Any fastembed-supported model |
+| `RAG_EMBEDDING_DIMS` | `384` | Must match the model above if you change it |
+| `RAG_MODEL_CACHE_DIR` | *(empty)* | Where the ~130MB model is cached after its first download |
+| `RAG_TOP_K` | `4` | Results returned per `rag_search` call |
+
+**Startup warm-up:** the embedding model loads once at boot
+([app/main.py](app/main.py)'s `_lifespan`), not on a user's first message —
+uvicorn (and so the deploy's health check) won't accept connections until
+that finishes. Without `RAG_MODEL_CACHE_DIR` pointed at a mounted volume,
+every container restart redownloads the model and pays that cost again.
+
+**Testing:** the default `pytest` layer never touches the real model —
+[tests/test_rag.py](tests/test_rag.py) swaps in a small deterministic fake
+embedding function, and the router tests in
+[tests/test_agent.py](tests/test_agent.py) stub the classification call
+entirely. One `integration`-marked test in
+[tests/test_integration.py](tests/test_integration.py) proves the real
+loop end to end: a first question hits the web and caches its results, a
+second, unrelated thread asking the same thing gets it from `rag_search`.
 
 ## Setup
 
@@ -309,9 +408,13 @@ Once the account is upgraded:
   TwiML immediately and the answer is delivered through the REST API from a
   background task.
 - **Memory** is keyed on the sender's WhatsApp number, so follow-ups like
-  "tell me more about the second one" work. It is in-process
-  (`MemorySaver`) and is lost on restart — swap in a persistent checkpointer
-  if you need durability across deploys.
+  "tell me more about the second one" work. Uses SQLite when `CHECKPOINT_DB`
+  is set (production does) so it survives container replacement, in-process
+  `MemorySaver` otherwise — see `_build_checkpointer` in
+  [app/agent.py](app/agent.py).
+- **The local knowledge base is shared, not per-sender** — see
+  [Local knowledge base (router + RAG)](#local-knowledge-base-router--rag)
+  above. One person's search can answer someone else's later question.
 - **Long replies** are split on line boundaries into 1500-char chunks, under
   WhatsApp's 1600-char cap.
 - **Non-text events** (delivery receipts, media-only messages) return 204 and

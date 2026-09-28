@@ -134,3 +134,92 @@ def test_a_failed_tool_call_does_not_corrupt_the_thread(monkeypatch):
         assert follow_up
     finally:
         agent_module.build_graph.cache_clear()
+
+
+class _RoutingStubLLM:
+    """Reports a fixed route classification and records which tools
+    call_model bound it with, so the router's tool-gating can be asserted
+    on directly rather than inferred from which tool the model happened to
+    call."""
+
+    def __init__(self, route_choice="web"):
+        self.route_choice = route_choice
+        self.bound_tool_names: list[str] | None = None
+
+    def with_structured_output(self, schema):
+        choice = self.route_choice
+
+        class _Router:
+            def invoke(self, messages):
+                return schema(choice=choice)
+
+        return _Router()
+
+    def bind_tools(self, tools):
+        self.bound_tool_names = [t.name for t in tools]
+
+        class _Bound:
+            def invoke(self, messages):
+                return AIMessage(content="stub reply")
+
+        return _Bound()
+
+
+def _route_and_get_bound_tools(monkeypatch, route_choice):
+    stub = _RoutingStubLLM(route_choice)
+    monkeypatch.setattr(settings, "checkpoint_db", "")
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_graph.cache_clear()
+
+    try:
+        agent_module.answer("does this need fresh info?", thread_id=f"route-{route_choice}")
+        return stub.bound_tool_names
+    finally:
+        agent_module.build_graph.cache_clear()
+
+
+def test_rag_route_only_offers_rag_search(monkeypatch):
+    assert _route_and_get_bound_tools(monkeypatch, "rag") == ["rag_search"]
+
+
+def test_web_route_offers_only_the_web_tools(monkeypatch):
+    assert _route_and_get_bound_tools(monkeypatch, "web") == ["news_search", "web_search"]
+
+
+def test_both_route_offers_every_tool(monkeypatch):
+    assert _route_and_get_bound_tools(monkeypatch, "both") == [
+        "rag_search",
+        "news_search",
+        "web_search",
+    ]
+
+
+def test_a_broken_router_fails_open_to_every_tool(monkeypatch):
+    """The classification call itself can fail (rate limit, bad output,
+    whatever) — that must cost an unnecessary tool offer, never a blocked
+    reply. See route_query's docstring in app/agent.py."""
+
+    class _BrokenRouter:
+        def with_structured_output(self, schema):
+            raise RuntimeError("router is down")
+
+        def bind_tools(self, tools):
+            self.bound_tool_names = [t.name for t in tools]
+
+            class _Bound:
+                def invoke(self, messages):
+                    return AIMessage(content="stub reply")
+
+            return _Bound()
+
+    stub = _BrokenRouter()
+    monkeypatch.setattr(settings, "checkpoint_db", "")
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_graph.cache_clear()
+
+    try:
+        reply = agent_module.answer("anything", thread_id="broken-router")
+        assert reply
+        assert stub.bound_tool_names == ["rag_search", "news_search", "web_search"]
+    finally:
+        agent_module.build_graph.cache_clear()

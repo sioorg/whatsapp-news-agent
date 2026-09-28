@@ -46,6 +46,24 @@ class Settings:
         default_factory=lambda: int(os.getenv("TAVILY_SEARCH_DAYS", "7"))
     )
 
+    # --- Local knowledge base (router + RAG) ---
+    # Path to the SQLite vector store. Empty = in-memory only (tests/local).
+    rag_db_path: str = field(default_factory=lambda: os.getenv("RAG_DB_PATH", ""))
+    # fastembed model: local, CPU-only, no API key. 384-dim by default —
+    # rag_embedding_dims must match whatever model is chosen here.
+    rag_embedding_model: str = field(
+        default_factory=lambda: os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    )
+    rag_embedding_dims: int = field(
+        default_factory=lambda: int(os.getenv("RAG_EMBEDDING_DIMS", "384"))
+    )
+    # Where fastembed caches the downloaded model. Empty = its own default
+    # (an ephemeral location in a container, redownloaded on every restart).
+    rag_model_cache_dir: str = field(
+        default_factory=lambda: os.getenv("RAG_MODEL_CACHE_DIR", "")
+    )
+    rag_top_k: int = field(default_factory=lambda: int(os.getenv("RAG_TOP_K", "4")))
+
     # Twilio sandbox default number. Override once you move to a paid number.
     twilio_whatsapp_from: str = field(
         default_factory=lambda: os.getenv("TWILIO_WHATSAPP_FROM", "whatsapp:+14155238886")

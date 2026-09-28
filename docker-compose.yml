@@ -8,10 +8,14 @@ services:
     # Secrets stay out of the image and out of git.
     env_file: .env
 
-    # Overrides .env: the store must live on the mounted volume, not in the
+    # Overrides .env: the stores must live on the mounted volume, not in the
     # container's ephemeral filesystem.
     environment:
       CHECKPOINT_DB: /data/checkpoints.sqlite
+      RAG_DB_PATH: /data/rag.sqlite
+      # Without this, fastembed re-downloads its ~130MB model from
+      # HuggingFace on every container restart instead of reusing it.
+      RAG_MODEL_CACHE_DIR: /data/fastembed_cache
 
     # Loopback only. cloudflared reaches the app over the shared Docker
     # network, not through this binding — it exists so you can curl

@@ -9,12 +9,14 @@ connector sends the reply, so there is no global provider switch to get wrong:
 
 import json
 import logging
-from typing import Callable
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Callable
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from app import rag
 from app.agent import answer
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
@@ -27,7 +29,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("whatsapp-news-agent")
 
-app = FastAPI(title="WhatsApp News Agent")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Load the local embedding model at boot, not on a user's first message.
+
+    Uvicorn (and so the deploy's health check) won't start accepting
+    connections until this returns, which is the point: a cold ~130MB
+    HuggingFace download/load happens once here rather than adding several
+    seconds to whichever message happens to trigger the first search after
+    a deploy. Never fails startup — a warm-up error (e.g. no network for a
+    first-ever download) just means rag_search retries lazily on first use.
+    """
+
+    try:
+        rag._embedder()
+    except Exception:
+        logger.exception("failed to warm up the local embedding model at startup")
+
+    yield
+
+
+app = FastAPI(title="WhatsApp News Agent", lifespan=_lifespan)
 
 FAILURE_REPLY = "Sorry, something went wrong fetching that news. Try again in a moment."
 

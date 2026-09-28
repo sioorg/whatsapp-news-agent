@@ -12,3 +12,10 @@ langchain-anthropic
 
 tavily-python
 twilio
+
+# Local knowledge base (router + RAG): LangGraph's SQLite-backed vector
+# store (already pulls in sqlite-vec via langgraph-checkpoint-sqlite) plus
+# fastembed for local, free, CPU-only embeddings — no API key, no per-call
+# cost, and much lighter than torch/sentence-transformers.
+fastembed
+pypdf
