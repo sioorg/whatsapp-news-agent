@@ -76,7 +76,16 @@ def build_graph():
 
     builder = StateGraph(State)
     builder.add_node("agent", call_model)
-    builder.add_node("tools", ToolNode(TOOLS))
+    # handle_tool_errors=True: ToolNode's default only catches LangChain's own
+    # ToolInvocationError (bad args), not a real Tavily failure (rate limit,
+    # bad key, timeout). Left uncaught, that exception propagates out of
+    # invoke() with a dangling, unanswered tool_call already checkpointed —
+    # every later message on this thread then resends that malformed history
+    # to the LLM and gets rejected, permanently, with no way for the user to
+    # recover. Catching it here turns a search failure into a normal
+    # ToolMessage instead, so the turn always finishes and the next message
+    # starts from a valid state.
+    builder.add_node("tools", ToolNode(TOOLS, handle_tool_errors=True))
 
     builder.add_edge(START, "agent")
     # tools_condition routes to "tools" on a tool call, otherwise to END.
