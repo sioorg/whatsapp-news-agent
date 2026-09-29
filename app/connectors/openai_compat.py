@@ -23,7 +23,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL_ID = "news-agent"
+MODEL_ID = "OneAgent"
 
 
 def is_authorized(authorization_header: str | None) -> bool:

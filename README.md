@@ -516,7 +516,7 @@ openssl rand -hex 32
    connection:
    - **Base URL:** whichever of the two above applies, from step 2
    - **API key:** the same value as `OPENAI_COMPAT_API_KEY`
-4. "news-agent" should now appear as a selectable model. Pick it and send a
+4. "OneAgent" should now appear as a selectable model. Pick it and send a
    message — replies stream in token by token, with real Markdown and
    source links.
 5. **Restrict who can use it.** Open WebUI's own login is the main gate for
