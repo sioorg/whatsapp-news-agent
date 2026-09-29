@@ -235,7 +235,10 @@ second, unrelated thread asking the same thing gets it from `rag_search`.
 [app/weather.py](app/weather.py) calls [Open-Meteo](https://open-meteo.com) —
 free, no API key, no signup, no rate limit at this scale — for the
 `get_weather` tool. Two calls per question: geocode the place name to
-coordinates, then fetch current conditions plus today's high/low.
+coordinates, then fetch current conditions plus a forecast. The model picks
+`unit` (`celsius`, the default, or `fahrenheit`) and `days` (1–7, default 1)
+from context — e.g. "in Fahrenheit" or "this weekend" — no fixed
+configuration for either.
 
 **Offered on every route** (`rag`, `web`, and `both` — see `ROUTE_TOOLS` in
 [app/agent.py](app/agent.py)), unlike the search tools, which the router

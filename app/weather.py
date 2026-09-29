@@ -13,6 +13,11 @@ GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 TIMEOUT_SECONDS = 10
 
+# Defensive caps, same spirit as Tavily's max_results / RAG's top_k
+# elsewhere in this codebase: a malformed or over-eager tool call (e.g. the
+# model asking for 100 days) must not blow up the request or the reply.
+MAX_FORECAST_DAYS = 7
+
 # WMO weather codes, as used by Open-Meteo's `weather_code` field.
 _WEATHER_CODES = {
     0: "clear sky",
@@ -81,7 +86,17 @@ def geocode(location: str) -> dict | None:
     return max(results, key=lambda r: r.get("population") or 0)
 
 
-def current_and_today(latitude: float, longitude: float) -> dict:
+def _normalize_unit(unit: str) -> str:
+    """Lenient about how the calling model spells it — "F", "Fahrenheit",
+    "fahrenheit" all mean the same thing; anything else defaults to
+    Celsius rather than erroring on an unrecognized value."""
+
+    return "fahrenheit" if str(unit).strip().lower().startswith("f") else "celsius"
+
+
+def fetch_forecast(latitude: float, longitude: float, *, unit: str = "celsius", days: int = 1) -> dict:
+    days = max(1, min(int(days), MAX_FORECAST_DAYS))
+
     response = requests.get(
         FORECAST_URL,
         params={
@@ -93,7 +108,8 @@ def current_and_today(latitude: float, longitude: float) -> dict:
             ),
             "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
             "timezone": "auto",
-            "forecast_days": 1,
+            "forecast_days": days,
+            "temperature_unit": _normalize_unit(unit),
         },
         timeout=TIMEOUT_SECONDS,
     )
@@ -104,28 +120,45 @@ def current_and_today(latitude: float, longitude: float) -> dict:
 def format_report(place: dict, forecast: dict) -> str:
     current = forecast["current"]
     daily = forecast["daily"]
+    # Open-Meteo echoes back the actual unit used, so the symbol is always
+    # right regardless of what was requested — never hardcode "°C".
+    temp_unit = forecast["current_units"]["temperature_2m"]
 
     where = ", ".join(
         part for part in [place.get("name"), place.get("admin1"), place.get("country")] if part
     )
 
-    return (
+    report = (
         f"Weather for {where}:\n"
-        f"Now: {current['temperature_2m']}°C "
-        f"(feels like {current['apparent_temperature']}°C), "
+        f"Now: {current['temperature_2m']}{temp_unit} "
+        f"(feels like {current['apparent_temperature']}{temp_unit}), "
         f"{describe(current['weather_code'])}, "
         f"{current['relative_humidity_2m']}% humidity, "
         f"wind {current['wind_speed_10m']} km/h.\n"
-        f"Today: high {daily['temperature_2m_max'][0]}°C, "
-        f"low {daily['temperature_2m_min'][0]}°C, "
-        f"{daily['precipitation_probability_max'][0]}% chance of precipitation."
     )
 
+    dates = daily["time"]
+    if len(dates) == 1:
+        report += (
+            f"Today: high {daily['temperature_2m_max'][0]}{temp_unit}, "
+            f"low {daily['temperature_2m_min'][0]}{temp_unit}, "
+            f"{daily['precipitation_probability_max'][0]}% chance of precipitation."
+        )
+    else:
+        report += "Forecast:\n" + "\n".join(
+            f"- {dates[i]}: high {daily['temperature_2m_max'][i]}{temp_unit}, "
+            f"low {daily['temperature_2m_min'][i]}{temp_unit}, "
+            f"{daily['precipitation_probability_max'][i]}% chance of precipitation"
+            for i in range(len(dates))
+        )
 
-def get_report(location: str) -> str:
+    return report
+
+
+def get_report(location: str, *, unit: str = "celsius", days: int = 1) -> str:
     place = geocode(location)
     if place is None:
         return f"Couldn't find a place called '{location}'."
 
-    forecast = current_and_today(place["latitude"], place["longitude"])
+    forecast = fetch_forecast(place["latitude"], place["longitude"], unit=unit, days=days)
     return format_report(place, forecast)

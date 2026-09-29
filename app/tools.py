@@ -127,17 +127,26 @@ def web_search(query: str) -> str:
 
 
 @tool
-def get_weather(location: str) -> str:
-    """Get the current weather and today's forecast for a place.
+def get_weather(location: str, unit: str = "celsius", days: int = 1) -> str:
+    """Get the current weather and forecast for a place.
 
     Prefer a place's current official name over a well-known alias, to avoid
     an ambiguous match — e.g. "Bengaluru" not "Bangalore", "Mumbai" not
     "Bombay", "Kolkata" not "Calcutta", "Chennai" not "Madras". Add the
     country if the name alone could mean more than one place internationally
     (e.g. "Springfield, Illinois" or "Cambridge, UK").
+
+    unit: "celsius" (default) or "fahrenheit" — use fahrenheit only if the
+    user asks for it explicitly, or the conversation makes clear they think
+    in it (e.g. they mentioned a US location or gave a temperature in °F).
+
+    days: how many days of forecast to include, 1 (default, today only) up
+    to 7. Use more than 1 only when the question is about future days —
+    "this weekend", "next week", "the next few days" — not for "right now"
+    or "today" questions.
     """
 
-    return weather.get_report(location)
+    return weather.get_report(location, unit=unit, days=days)
 
 
 TOOLS = [rag_search, news_search, web_search, get_weather]

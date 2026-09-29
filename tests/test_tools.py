@@ -97,11 +97,39 @@ def test_news_search_caches_its_results(monkeypatch):
 
 
 def test_get_weather_delegates_to_the_weather_module(monkeypatch):
-    monkeypatch.setattr(tools_module.weather, "get_report", lambda location: f"report for {location}")
+    monkeypatch.setattr(
+        tools_module.weather, "get_report", lambda location, **_: f"report for {location}"
+    )
 
     result = tools_module.get_weather.invoke({"location": "Bengaluru"})
 
     assert result == "report for Bengaluru"
+
+
+def test_get_weather_forwards_unit_and_days(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tools_module.weather,
+        "get_report",
+        lambda location, **kwargs: calls.append((location, kwargs)) or "ok",
+    )
+
+    tools_module.get_weather.invoke({"location": "Paris", "unit": "fahrenheit", "days": 5})
+
+    assert calls == [("Paris", {"unit": "fahrenheit", "days": 5})]
+
+
+def test_get_weather_defaults_to_celsius_and_one_day(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tools_module.weather,
+        "get_report",
+        lambda location, **kwargs: calls.append((location, kwargs)) or "ok",
+    )
+
+    tools_module.get_weather.invoke({"location": "Paris"})
+
+    assert calls == [("Paris", {"unit": "celsius", "days": 1})]
 
 
 def test_get_weather_is_never_cached_into_rag(monkeypatch):
@@ -112,7 +140,7 @@ def test_get_weather_is_never_cached_into_rag(monkeypatch):
 
     cached = []
     monkeypatch.setattr(tools_module.rag, "cache_search_results", cached.append)
-    monkeypatch.setattr(tools_module.weather, "get_report", lambda location: "sunny")
+    monkeypatch.setattr(tools_module.weather, "get_report", lambda location, **_: "sunny")
 
     tools_module.get_weather.invoke({"location": "Bengaluru"})
 
