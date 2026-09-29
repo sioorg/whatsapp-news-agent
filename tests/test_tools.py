@@ -94,3 +94,26 @@ def test_news_search_caches_its_results(monkeypatch):
     tools_module.news_search.invoke({"query": "AI"})
 
     assert cached == [[{"title": "t", "url": "u"}]]
+
+
+def test_get_weather_delegates_to_the_weather_module(monkeypatch):
+    monkeypatch.setattr(tools_module.weather, "get_report", lambda location: f"report for {location}")
+
+    result = tools_module.get_weather.invoke({"location": "Bengaluru"})
+
+    assert result == "report for Bengaluru"
+
+
+def test_get_weather_is_never_cached_into_rag(monkeypatch):
+    """Unlike news_search/web_search, weather must never be fed into the
+    shared local store — a stale cached reading served up later as
+    "current" would be actively wrong, not just outdated context (see
+    app/weather.py's module docstring)."""
+
+    cached = []
+    monkeypatch.setattr(tools_module.rag, "cache_search_results", cached.append)
+    monkeypatch.setattr(tools_module.weather, "get_report", lambda location: "sunny")
+
+    tools_module.get_weather.invoke({"location": "Bengaluru"})
+
+    assert cached == []

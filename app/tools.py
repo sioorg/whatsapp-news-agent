@@ -1,6 +1,7 @@
-"""Search tools exposed to the LangGraph agent: local knowledge first, then
-Tavily for the web. See app.agent for how a question is routed to one, the
-other, or both, and app.rag for the local store itself."""
+"""Tools exposed to the LangGraph agent: local knowledge, Tavily for the
+web, and live weather. See app.agent for how a question is routed to rag,
+web, or both (get_weather is offered on every route — see there for why),
+app.rag for the local store, and app.weather for the weather backend."""
 
 import logging
 from functools import lru_cache
@@ -8,7 +9,7 @@ from functools import lru_cache
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
-from app import rag
+from app import rag, weather
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -125,4 +126,18 @@ def web_search(query: str) -> str:
     return _format(results)
 
 
-TOOLS = [rag_search, news_search, web_search]
+@tool
+def get_weather(location: str) -> str:
+    """Get the current weather and today's forecast for a place.
+
+    Prefer a place's current official name over a well-known alias, to avoid
+    an ambiguous match — e.g. "Bengaluru" not "Bangalore", "Mumbai" not
+    "Bombay", "Kolkata" not "Calcutta", "Chennai" not "Madras". Add the
+    country if the name alone could mean more than one place internationally
+    (e.g. "Springfield, Illinois" or "Cambridge, UK").
+    """
+
+    return weather.get_report(location)
+
+
+TOOLS = [rag_search, news_search, web_search, get_weather]

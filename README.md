@@ -34,7 +34,8 @@ switch to misconfigure:
 | [app/config.py](app/config.py) | Env-backed settings, resolved once at import |
 | [app/llm.py](app/llm.py) | Chat model factory — Groq or Anthropic |
 | [app/rag.py](app/rag.py) | Local knowledge store — LangGraph `SqliteStore` + local embeddings |
-| [app/tools.py](app/tools.py) | `rag_search` (local) and Tavily's `news_search`/`web_search` |
+| [app/weather.py](app/weather.py) | Live weather via Open-Meteo — free, keyless |
+| [app/tools.py](app/tools.py) | `rag_search` (local), Tavily's `news_search`/`web_search`, `get_weather` |
 | [app/agent.py](app/agent.py) | LangGraph graph — router + agent/tools loop + per-sender memory |
 | [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both WhatsApp connectors |
 | [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send, payload parsing, HMAC signature |
@@ -73,10 +74,10 @@ switch to misconfigure:
        ┌─────────┐  ┌─────┐
        │  tools  │  │ END │
        └────┬────┘  └─────┘
-            │        ToolNode(TOOLS) — always holds all 3 tools regardless
+            │        ToolNode(TOOLS) — always holds all 4 tools regardless
             │        of route (agent.py:168): it only executes whatever the
             │        model actually called, never chooses on its own
-            │        rag_search / news_search / web_search
+            │        rag_search / news_search / web_search / get_weather
             └────────────┐
                          │  results appended as a ToolMessage
                          ▼
@@ -228,6 +229,36 @@ entirely. One `integration`-marked test in
 [tests/test_integration.py](tests/test_integration.py) proves the real
 loop end to end: a first question hits the web and caches its results, a
 second, unrelated thread asking the same thing gets it from `rag_search`.
+
+## Weather
+
+[app/weather.py](app/weather.py) calls [Open-Meteo](https://open-meteo.com) —
+free, no API key, no signup, no rate limit at this scale — for the
+`get_weather` tool. Two calls per question: geocode the place name to
+coordinates, then fetch current conditions plus today's high/low.
+
+**Offered on every route** (`rag`, `web`, and `both` — see `ROUTE_TOOLS` in
+[app/agent.py](app/agent.py)), unlike the search tools, which the router
+does gate. There's no Tavily quota to protect here, and gating it would risk
+a real failure: a weather question the router misclassifies as `rag` would
+otherwise have no way to get a real answer. It's also never cached into the
+local knowledge base (see [Local knowledge base](#local-knowledge-base-router--rag)
+above) — unlike a news article, a stale cached reading served up later as
+"current" would be actively wrong, not just outdated.
+
+**A real limitation worth knowing, found during development, not fully
+solved:** Open-Meteo's geocoding only matches the literal name given, not
+aliases. Searching "Bangalore" returns only a tiny, unrelated town in
+Pakistan — the actual 8.5-million-person city is indexed solely as
+"Bengaluru". When several places *do* share a name (e.g. "Springfield"
+matches five US cities), `geocode()` picks the most populous one, which
+handles that case — but a well-known alias resolving to the *wrong* place
+entirely isn't something population-ranking can catch. Mitigated, not
+solved: the tool's docstring asks the calling model to prefer current
+official names (leaning on its own general knowledge of common aliases —
+"Bengaluru" not "Bangalore", "Mumbai" not "Bombay"), and every report names
+the resolved place, region, and country up front, so a wrong match is at
+least visible rather than silently trusted.
 
 ## Setup
 

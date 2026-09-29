@@ -178,12 +178,19 @@ def _route_and_get_bound_tools(monkeypatch, route_choice):
         agent_module.build_graph.cache_clear()
 
 
-def test_rag_route_only_offers_rag_search(monkeypatch):
-    assert _route_and_get_bound_tools(monkeypatch, "rag") == ["rag_search"]
+def test_rag_route_offers_rag_search_and_weather(monkeypatch):
+    """get_weather rides along on every route — see ROUTE_TOOLS's comment
+    in app/agent.py for why it isn't gated like the search tools are."""
+
+    assert _route_and_get_bound_tools(monkeypatch, "rag") == ["rag_search", "get_weather"]
 
 
-def test_web_route_offers_only_the_web_tools(monkeypatch):
-    assert _route_and_get_bound_tools(monkeypatch, "web") == ["news_search", "web_search"]
+def test_web_route_offers_the_web_tools_and_weather(monkeypatch):
+    assert _route_and_get_bound_tools(monkeypatch, "web") == [
+        "news_search",
+        "web_search",
+        "get_weather",
+    ]
 
 
 def test_both_route_offers_every_tool(monkeypatch):
@@ -191,6 +198,7 @@ def test_both_route_offers_every_tool(monkeypatch):
         "rag_search",
         "news_search",
         "web_search",
+        "get_weather",
     ]
 
 
@@ -220,7 +228,12 @@ def test_a_broken_router_fails_open_to_every_tool(monkeypatch):
     try:
         reply = agent_module.answer("anything", thread_id="broken-router")
         assert reply
-        assert stub.bound_tool_names == ["rag_search", "news_search", "web_search"]
+        assert stub.bound_tool_names == [
+            "rag_search",
+            "news_search",
+            "web_search",
+            "get_weather",
+        ]
     finally:
         agent_module.build_graph.cache_clear()
 

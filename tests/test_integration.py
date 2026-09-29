@@ -39,6 +39,39 @@ def test_tavily_returns_recent_articles():
     assert _URL.search(output), "no source URL in tool output"
 
 
+def test_get_weather_returns_a_real_reading():
+    """Open-Meteo needs no credentials — this only depends on GROQ_API_KEY
+    via the shared require_keys fixture for consistency with the rest of
+    this file, not because weather.py itself needs it."""
+
+    from app.weather import get_report
+
+    report = get_report("Bengaluru")
+
+    assert "Bengaluru" in report
+    assert "°C" in report
+
+
+def test_agent_calls_get_weather_for_a_weather_question():
+    """A weather question must trigger get_weather, on every route — see
+    ROUTE_TOOLS in app/agent.py for why it's never gated like the search
+    tools are."""
+
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from app.agent import build_graph
+
+    result = build_graph().invoke(
+        {"messages": [HumanMessage(content="What's the weather like in Bengaluru right now?")]},
+        config={"configurable": {"thread_id": "ci-weather"}, "recursion_limit": 12},
+    )
+
+    tool_messages = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    assert any(m.name == "get_weather" for m in tool_messages), (
+        "agent answered a weather question without calling get_weather"
+    )
+
+
 def test_agent_searches_rather_than_answering_from_memory():
     """A news question must trigger a tool call, not a recalled answer."""
 

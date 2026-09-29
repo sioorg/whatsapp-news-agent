@@ -34,7 +34,7 @@ from typing_extensions import TypedDict
 
 from app.config import settings
 from app.llm import build_llm
-from app.tools import TOOLS, news_search, rag_search, web_search
+from app.tools import TOOLS, get_weather, news_search, rag_search, web_search
 
 # WhatsApp/Twilio: plaintext, WhatsApp's own *bold*/_italic_ convention (not
 # standard Markdown — a single asterisk is italic in most Markdown flavors),
@@ -47,6 +47,8 @@ reach for news_search/web_search if rag_search doesn't have enough, or isn't \
 offered to you this turn.
 - For anything about current events or "latest" news, call the news_search tool. \
 Never answer from memory about recent events.
+- For weather questions, call the get_weather tool. Never guess at current \
+conditions from memory — weather changes hour to hour.
 - Keep replies under 1200 characters. WhatsApp is a chat, not a report.
 - Lead with a one-line summary, then up to 5 bullets. Each bullet: headline, \
 one sentence of context, then the source URL on the same line.
@@ -66,6 +68,8 @@ reach for news_search/web_search if rag_search doesn't have enough, or isn't \
 offered to you this turn.
 - For anything about current events or "latest" news, call the news_search tool. \
 Never answer from memory about recent events.
+- For weather questions, call the get_weather tool. Never guess at current \
+conditions from memory — weather changes hour to hour.
 - Use standard Markdown: **bold**, _italic_, headings, and bullet lists as \
 appropriate. Cite sources as Markdown links, e.g. [source name](https://...).
 - If the search returns nothing relevant, say so plainly instead of speculating.
@@ -102,9 +106,16 @@ class Route(BaseModel):
 # the model actually called — this only constrains what the model is
 # offered, keeping "web" turns from skipping the free local check, and "rag"
 # turns from spending a Tavily call on something already on file.
+#
+# get_weather rides along on every route, unlike the search tools: it's free
+# (no Tavily quota to protect) and near-instant, and gating it behind the
+# router would risk a genuine failure mode — a weather question the router
+# misclassifies as "rag" would otherwise have no way to get a real answer,
+# since rag_search's cached knowledge is never a substitute for a live
+# reading (see app/weather.py for why weather isn't cached there either).
 ROUTE_TOOLS: dict[str, list] = {
-    "rag": [rag_search],
-    "web": [news_search, web_search],
+    "rag": [rag_search, get_weather],
+    "web": [news_search, web_search, get_weather],
     "both": TOOLS,
 }
 
