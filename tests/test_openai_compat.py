@@ -30,6 +30,16 @@ def test_is_authorized_rejects_a_non_bearer_header():
     assert oc.is_authorized(f"Token {settings.openai_compat_api_key()}") is False
 
 
+def test_is_authorized_fails_closed_when_the_key_is_unconfigured(monkeypatch):
+    """A missing OPENAI_COMPAT_API_KEY must deny access, not crash with a
+    500 the moment someone sends any Authorization header — reproduced
+    against the real deployed endpoint before this fix (see the fix
+    commit)."""
+
+    monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    assert oc.is_authorized("Bearer anything") is False
+
+
 def test_models_payload_lists_the_one_model():
     payload = oc.models_payload()
 

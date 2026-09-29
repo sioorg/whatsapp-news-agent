@@ -29,17 +29,25 @@ MODEL_ID = "news-agent"
 def is_authorized(authorization_header: str | None) -> bool:
     """Check a Bearer token against the configured key.
 
-    This endpoint is meant to be reachable only from inside the Docker
-    network (Open WebUI's container, not the public internet — see the
-    README), so this is defense in depth rather than the primary access
-    control. It also happens to be what any OpenAI-style client expects to
-    send anyway.
+    This is the *real* access control, not defense in depth — these routes
+    share the same public hostname as everything else in this app, with no
+    path-level isolation at the Cloudflare tunnel (see the README).
+
+    Fails closed: if OPENAI_COMPAT_API_KEY isn't set at all, every request
+    is unauthorized rather than raising — deploying before the key exists
+    on the box must not turn into a 500 (and a stack trace) for anyone who
+    happens to send an Authorization header, it should look like any other
+    wrong key.
     """
 
     if not authorization_header or not authorization_header.startswith("Bearer "):
         return False
     token = authorization_header.removeprefix("Bearer ")
-    return token == settings.openai_compat_api_key()
+    try:
+        expected = settings.openai_compat_api_key()
+    except RuntimeError:
+        return False
+    return token == expected
 
 
 def models_payload() -> dict:
