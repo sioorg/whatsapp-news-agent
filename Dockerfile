@@ -15,6 +15,9 @@ COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
 COPY app ./app
+# Maintenance CLIs (scripts/ingest_docs.py, scripts/reset_thread.py), meant
+# to be run with `docker exec` against the live container.
+COPY scripts ./scripts
 
 # Writable home for the conversation store; owned by the unprivileged user.
 RUN useradd --create-home --uid 10001 appuser \

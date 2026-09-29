@@ -4,9 +4,12 @@
     PYTHONPATH=. .venv/bin/python scripts/reset_thread.py 919902245562
 
 In Docker, run it inside the running container so it uses the same
-CHECKPOINT_DB path and dependencies the live app does:
+CHECKPOINT_DB path and dependencies the live app does. PYTHONPATH=/app is
+required here — `docker exec`'s working directory is /app (the image's
+WORKDIR), but Python only puts a script's own directory on sys.path, not
+the CWD, so `from app...` fails to find the app package without it:
 
-    docker exec whatsapp-news-agent \
+    docker exec -e PYTHONPATH=/app whatsapp-news-agent \
         python scripts/reset_thread.py 919902245562
 
 This deletes ONLY that thread's checkpoint rows. Everyone else's history,
