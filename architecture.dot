@@ -1,0 +1,199 @@
+digraph WhatsAppNewsAgent {
+    rankdir=TB;
+    fontname="Helvetica";
+    fontsize=22;
+    label="OneAgent — complete architecture";
+    labelloc="t";
+    pad=0.4;
+    nodesep=0.35;
+    ranksep=0.55;
+    compound=true;
+
+    node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", margin="0.18,0.12"];
+    edge [fontname="Helvetica", fontsize=10, color="#555555", fontcolor="#333333"];
+
+    // ---------------------------------------------------------------
+    // Clients
+    // ---------------------------------------------------------------
+    subgraph cluster_clients {
+        label="People";
+        style="rounded,filled";
+        color="#c9d6e3";
+        fillcolor="#eef3f8";
+        fontsize=13;
+
+        whatsapp_user [label="WhatsApp app\ntest number: +1 555-190-7061\n(up to 5 verified numbers —\nMeta free test-number limit)", fillcolor="#d9ead3"];
+        openwebui [label="Open WebUI (browser)\nhttps://ai.siopinto.co.in/\nmodel shown: \"OneAgent\"\nhost-networked on the same box", fillcolor="#d9ead3"];
+    }
+
+    // ---------------------------------------------------------------
+    // Public entry
+    // ---------------------------------------------------------------
+    subgraph cluster_entry {
+        label="Public entry — one hostname, no path isolation";
+        style="rounded,filled";
+        color="#e3c9c9";
+        fillcolor="#fbeeee";
+        fontsize=13;
+
+        cloudflared [label="cloudflared\ncontainer: cloudflared-tunnel\nnamed tunnel → news.siopinto.co.in\n(Cloudflare Zero Trust, dashboard-managed)", fillcolor="#f4cccc"];
+    }
+
+    whatsapp_user -> cloudflared [label="Meta WhatsApp\nCloud API webhook"];
+    openwebui -> cloudflared [label="browser reaches Open WebUI via\nhttps://ai.siopinto.co.in/\n(separate hostname, same tunnel)"];
+
+    // ---------------------------------------------------------------
+    // FastAPI app / connectors
+    // ---------------------------------------------------------------
+    subgraph cluster_app {
+        label="Docker container: whatsapp-news-agent  (image whatsapp-news-agent:latest)\napp/main.py — FastAPI(title=\"WhatsApp News Agent\")";
+        style="rounded,filled";
+        color="#c9b8dd";
+        fillcolor="#f1ecf7";
+        fontsize=13;
+
+        routes [label=<
+<table border="0" cellborder="0" cellspacing="2">
+<tr><td align="left"><b>Routes</b></td></tr>
+<tr><td align="left">GET/POST /webhook/meta</td></tr>
+<tr><td align="left">POST /webhook/whatsapp (Twilio)</td></tr>
+<tr><td align="left">GET /v1/models, POST /v1/chat/completions</td></tr>
+<tr><td align="left">POST /v1/audio/transcriptions, /v1/audio/speech</td></tr>
+<tr><td align="left">POST /chat (local test), GET /health</td></tr>
+</table>>, shape=box, fillcolor="#ffffff"];
+
+        subgraph cluster_connectors {
+            label="app/connectors/";
+            style="rounded,filled";
+            color="#c9b8dd";
+            fillcolor="#e8e0f2";
+            fontsize=12;
+
+            meta_conn [label="meta_whatsapp.py\nGraph API v21.0\nsend/receive, media\nupload/download, HMAC (X-Hub-Signature-256)", fillcolor="#d9d2e9"];
+            twilio_conn [label="twilio_whatsapp.py\n(dormant — needs an\nupgraded Twilio account)", fillcolor="#e6e0ee"];
+            openai_conn [label="openai_compat.py\nmodel id: \"OneAgent\"\nOPENAI_COMPAT_API_KEY bearer auth\nSSE streaming", fillcolor="#d9d2e9"];
+        }
+
+        routes -> meta_conn;
+        routes -> twilio_conn;
+        routes -> openai_conn;
+        openwebui -> openai_conn [
+            label="Open WebUI's backend calls this\ndirectly at http://localhost:8000/v1\n(host networking — bypasses\nthe tunnel for this hop)",
+            style=dashed, constraint=false
+        ];
+    }
+
+    cloudflared -> routes;
+
+    // ---------------------------------------------------------------
+    // Agent core
+    // ---------------------------------------------------------------
+    subgraph cluster_agent {
+        label="app/agent.py — LangGraph";
+        style="rounded,filled";
+        color="#b8d3dd";
+        fillcolor="#eaf4f7";
+        fontsize=13;
+
+        route_node [label="route_query node\nclassifies: rag / web / both\n(Route pydantic model;\nfails open to \"both\")", fillcolor="#cfe2f3"];
+        call_model [label="call_model node\nWHATSAPP_SYSTEM_PROMPT or\nWEB_SYSTEM_PROMPT + state[\"route\"]", fillcolor="#cfe2f3"];
+        tool_node [label="ToolNode\n(handle_tool_errors=True)", fillcolor="#cfe2f3"];
+
+        route_node -> call_model;
+        call_model -> tool_node [label="tool_calls"];
+        tool_node -> call_model [label="ToolMessage"];
+
+        graphs_note [label="build_graph() — checkpointed (WhatsApp/Twilio/chat)\nbuild_stateless_graph() — no checkpointer (web; caller resends full history)\nrecursion_limit=12", shape=note, fillcolor="#fff2cc", fontsize=10];
+    }
+
+    meta_conn -> route_node [label="answer(text, thread_id=wa_id)"];
+    twilio_conn -> route_node [style=dashed];
+    openai_conn -> route_node [label="stream_reply(messages)\n(stateless graph)"];
+
+    // ---------------------------------------------------------------
+    // Tools
+    // ---------------------------------------------------------------
+    subgraph cluster_tools {
+        label="app/tools.py — TOOLS, gated per route via ROUTE_TOOLS";
+        style="rounded,filled";
+        color="#dde3b8";
+        fillcolor="#f6f8ec";
+        fontsize=13;
+
+        rag_tool [label="rag_search\noffered on: rag, both", fillcolor="#e2eec6"];
+        news_tool [label="news_search / web_search\noffered on: web, both", fillcolor="#e2eec6"];
+        weather_tool [label="get_weather\noffered on: every route\nparams: unit, days (1-7)", fillcolor="#e2eec6"];
+    }
+
+    tool_node -> rag_tool;
+    tool_node -> news_tool;
+    tool_node -> weather_tool;
+
+    // ---------------------------------------------------------------
+    // Data / voice
+    // ---------------------------------------------------------------
+    subgraph cluster_data {
+        label="Local data & voice — app/rag.py, app/weather.py, app/voice.py";
+        style="rounded,filled";
+        color="#ddd0b8";
+        fillcolor="#f8f3ec";
+        fontsize=13;
+
+        rag_store [label="app/rag.py\nLangGraph SqliteStore + sqlite-vec\nembeddings: fastembed\nmodel: BAAI/bge-small-en-v1.5 (384-dim)\nfile: /data/rag.sqlite\nshared across every channel", fillcolor="#f2e2c4"];
+        checkpoint_store [label="app/agent.py: SqliteSaver\nfile: /data/checkpoints.sqlite\nkeyed per sender (thread_id)", fillcolor="#f2e2c4"];
+        voice_mod [label="app/voice.py\nSTT model: whisper-large-v3\nTTS model: canopylabs/orpheus-v1-english\nvoice: \"autumn\" (default)\nffmpeg: wav → 16kHz mono Opus/Ogg", fillcolor="#f2e2c4"];
+    }
+
+    rag_tool -> rag_store;
+    news_tool -> rag_store [label="auto-caches\nresults", style=dashed];
+    call_model -> checkpoint_store [style=dashed, label="build_graph only"];
+    meta_conn -> voice_mod [label="voice note\nin / out"];
+    openai_conn -> voice_mod [label="/v1/audio/*"];
+
+    // ---------------------------------------------------------------
+    // External services
+    // ---------------------------------------------------------------
+    subgraph cluster_external {
+        label="External APIs";
+        style="rounded,filled";
+        color="#e3d3c9";
+        fillcolor="#fbf3ee";
+        fontsize=13;
+
+        groq [label="Groq API\nLLM_PROVIDER=groq (default)\nGROQ_MODEL=qwen/qwen3.8-27b\n(alt: ANTHROPIC_MODEL=claude-sonnet-5)\n+ Whisper STT, Orpheus TTS", fillcolor="#f9cb9c"];
+        tavily [label="Tavily Search API\nnews_search (topic=news)\nweb_search (topic=general)", fillcolor="#f9cb9c"];
+        openmeteo [label="Open-Meteo API\ngeocoding-api + api.open-meteo.com\nfree, no key", fillcolor="#f9cb9c"];
+        meta_graph [label="Meta Graph API v21.0\ngraph.facebook.com\nmessages, media, subscribed_apps", fillcolor="#f9cb9c"];
+    }
+
+    call_model -> groq [label="chat + route\nclassification"];
+    voice_mod -> groq [label="audio.transcriptions\naudio.speech"];
+    news_tool -> tavily;
+    weather_tool -> openmeteo;
+    meta_conn -> meta_graph;
+
+    // ---------------------------------------------------------------
+    // Deployment / CI-CD
+    // ---------------------------------------------------------------
+    subgraph cluster_deploy {
+        label="Deployment & CI/CD — GitHub org: sioorg";
+        style="rounded,filled";
+        color="#b8ddc0";
+        fillcolor="#eaf7ee";
+        fontsize=13;
+
+        github [label="GitHub: sioorg/whatsapp-news-agent\nshared workflows: sioorg/ci-workflows@v1\n(python-test.yml, docker-deploy.yml,\nagent-eval.yml)", fillcolor="#c9e6d0"];
+        runner [label="Self-hosted runner\nname: ai-ubuntu-server\n(org-level, labels: self-hosted,Linux,X64)", fillcolor="#c9e6d0"];
+        docker [label="docker compose\nhost path: /home/mysio/my-apps/\nwhatsapp-news-agent\nvolume: agent-data\nnetwork: edge (external)", fillcolor="#c9e6d0"];
+        telegram [label="Telegram bot (@BotFather)\nsendMessage → TELEGRAM_CHAT_ID\ndeploy + nightly-eval alerts", fillcolor="#c9e6d0"];
+        scripts [label="Maintenance CLIs (docker exec)\nscripts/ingest_docs.py\nscripts/reset_thread.py", shape=note, fillcolor="#fff2cc", fontsize=10];
+    }
+
+    github -> runner [label="push to main"];
+    runner -> docker [label="test → deploy →\nhealth check (/health)"];
+    docker -> routes [label="builds & runs this\ncontainer (docker compose\nup -d --build)"];
+    runner -> telegram [label="deploy/eval result"];
+    docker -> scripts [style=dotted, dir=none];
+
+    { rank=same; whatsapp_user; openwebui; }
+}
