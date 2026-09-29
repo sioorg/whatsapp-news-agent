@@ -441,18 +441,46 @@ openssl rand -hex 32
 
 **Setup, once the box has this deployed:**
 
-1. Add the generated key to `.env` on the box as `OPENAI_COMPAT_API_KEY`,
-   then redeploy (a push to `main` does this automatically).
-2. Put Open WebUI on the same Docker network as the agent, so it can reach
-   it by container name instead of round-tripping through the public
-   internet:
+1. Add the generated key to `.env` on the box as `OPENAI_COMPAT_API_KEY`.
+   This is a `.env`-only change, not a code change, so pushing to `main`
+   does **not** pick it up — recreate the container directly instead:
 
    ```bash
-   docker network connect edge open-webui
+   cd /home/mysio/my-apps/whatsapp-news-agent
+   docker compose up -d --force-recreate
    ```
+
+   (`docker restart` is not enough — it reuses the environment the
+   container was originally created with, it doesn't re-read `.env`.)
+
+2. Work out how Open WebUI can reach the agent, which depends on how its
+   container is networked:
+
+   ```bash
+   docker inspect open-webui --format '{{.HostConfig.NetworkMode}}'
+   ```
+
+   - **`host`** — it shares the box's own network stack directly. Since
+     this compose file already publishes the agent to `127.0.0.1:8000` on
+     the host (for local `curl` debugging), it's already reachable with no
+     further setup: use `http://localhost:8000/v1` as the base URL below.
+     This is the tighter setup — that port is loopback-only, never exposed
+     to the LAN or internet.
+   - **`bridge`/`default`** — join it to the same Docker network as the
+     agent, so it can reach it by container name:
+
+     ```bash
+     docker network connect edge open-webui
+     ```
+
+     then use `http://whatsapp-news-agent:8000/v1` as the base URL.
+   - **`container:<name>`** — it shares another container's network
+     namespace; reachability depends on what that container can already
+     reach, figure out from there.
+
 3. In Open WebUI, go to **Admin Settings → Connections**, add an OpenAI API
    connection:
-   - **Base URL:** `http://whatsapp-news-agent:8000/v1`
+   - **Base URL:** whichever of the two above applies, from step 2
    - **API key:** the same value as `OPENAI_COMPAT_API_KEY`
 4. "news-agent" should now appear as a selectable model. Pick it and send a
    message — replies stream in token by token, with real Markdown and
