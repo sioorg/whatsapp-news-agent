@@ -18,13 +18,14 @@ WhatsApp ──▶ Meta Cloud API ──▶ POST /webhook/meta ──▶ LangGra
 WhatsApp ◀── Graph API send ◀──── background task ◀──────────┘
 ```
 
-Two providers are supported, each on its own route, so there is no global
+Three connectors are supported, each on its own route, so there is no global
 switch to misconfigure:
 
-| Route | Provider | Status |
+| Route | Connector | Status |
 | --- | --- | --- |
 | `/webhook/meta` | Meta WhatsApp Cloud API | **Default.** Free tier, free-form replies |
 | `/webhook/whatsapp` | Twilio | Requires an **upgraded** account — see below |
+| `/v1/chat/completions` | OpenAI-compatible (web frontend) | For Open WebUI or any OpenAI-style client — see below |
 
 ## Layout
 
@@ -35,11 +36,13 @@ switch to misconfigure:
 | [app/rag.py](app/rag.py) | Local knowledge store — LangGraph `SqliteStore` + local embeddings |
 | [app/tools.py](app/tools.py) | `rag_search` (local) and Tavily's `news_search`/`web_search` |
 | [app/agent.py](app/agent.py) | LangGraph graph — router + agent/tools loop + per-sender memory |
-| [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both connectors |
+| [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both WhatsApp connectors |
 | [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send, payload parsing, HMAC signature |
 | [app/connectors/twilio_whatsapp.py](app/connectors/twilio_whatsapp.py) | Twilio send, form parsing, signature |
-| [app/main.py](app/main.py) | FastAPI webhooks, `/chat` test endpoint, RAG model warm-up |
+| [app/connectors/openai_compat.py](app/connectors/openai_compat.py) | OpenAI-style message conversion, `/v1/models`, SSE streaming |
+| [app/main.py](app/main.py) | FastAPI webhooks, `/v1/*`, `/chat` test endpoint, RAG model warm-up |
 | [scripts/ingest_docs.py](scripts/ingest_docs.py) | CLI to add your own `.txt`/`.md`/`.pdf` files to the knowledge base |
+| [scripts/reset_thread.py](scripts/reset_thread.py) | CLI to clear one WhatsApp number's stuck conversation history |
 
 ## Code flow
 
@@ -400,6 +403,68 @@ Once the account is upgraded:
 - Point the sender's inbound webhook at `/webhook/whatsapp`.
 - Set `VALIDATE_TWILIO_SIGNATURE=true` and `PUBLIC_BASE_URL` to your https
   origin, exactly as Twilio calls it.
+
+## Connect a web frontend (OpenAI-compatible)
+
+`app/connectors/openai_compat.py` makes the agent look like an OpenAI chat
+model — `GET /v1/models` and `POST /v1/chat/completions`, with real token
+streaming — so any client that speaks that API can use it. This project
+points [Open WebUI](https://github.com/open-webui/open-webui) at it, already
+self-hosted on the same box, rather than building a bespoke frontend.
+
+**Architecture difference from WhatsApp, worth knowing:** the OpenAI chat
+API is stateless server-side — the client resends the full conversation on
+every request, rather than the server remembering it by a stable id.
+Because of that, this connector uses `stream_reply`/`build_stateless_graph`
+(see [app/agent.py](app/agent.py)) instead of `answer`/`build_graph`: no
+checkpointer, no thread_id, nothing written to `CHECKPOINT_DB`. A web
+conversation lives in Open WebUI's own history, entirely separate from any
+WhatsApp thread. The one thing that *is* still shared across every channel
+is the local knowledge base — a search triggered from WhatsApp benefits a
+later web question and vice versa, since that store was never per-thread to
+begin with. The web connector also uses its own system prompt
+(`WEB_SYSTEM_PROMPT`) — real Markdown, no WhatsApp-style `*bold*`/length cap
+— any system message the client itself sends is dropped, since the agent's
+tool-calling and routing behavior depends on a prompt this project controls.
+
+**Security model — read this before exposing it.** These routes live on the
+*same* public hostname as `/webhook/*`, `/chat`, and `/health` — there is no
+path-level restriction at the Cloudflare tunnel, so `/v1/chat/completions`
+is reachable from the internet exactly like everything else in this app.
+`OPENAI_COMPAT_API_KEY` (checked by `is_authorized` in the connector) is the
+*only* thing gating it. Generate a long random value and treat it as a real
+secret, not a formality:
+
+```bash
+openssl rand -hex 32
+```
+
+**Setup, once the box has this deployed:**
+
+1. Add the generated key to `.env` on the box as `OPENAI_COMPAT_API_KEY`,
+   then redeploy (a push to `main` does this automatically).
+2. Put Open WebUI on the same Docker network as the agent, so it can reach
+   it by container name instead of round-tripping through the public
+   internet:
+
+   ```bash
+   docker network connect edge open-webui
+   ```
+3. In Open WebUI, go to **Admin Settings → Connections**, add an OpenAI API
+   connection:
+   - **Base URL:** `http://whatsapp-news-agent:8000/v1`
+   - **API key:** the same value as `OPENAI_COMPAT_API_KEY`
+4. "news-agent" should now appear as a selectable model. Pick it and send a
+   message — replies stream in token by token, with real Markdown and
+   source links.
+5. **Restrict who can use it.** Open WebUI's own login is the main gate for
+   *people*, separate from the API key above (which only gates the
+   machine-to-machine connection). Set `ENABLE_SIGNUP=false` on Open WebUI's
+   own container/compose file (managed separately from this repo) so only
+   accounts you create can sign in — otherwise anyone who finds the public
+   Open WebUI URL can register themselves an account and start spending
+   your Groq/Tavily quota, which has no natural cap the way WhatsApp's
+   5-verified-recipient test-number limit does.
 
 ## Behaviour notes
 

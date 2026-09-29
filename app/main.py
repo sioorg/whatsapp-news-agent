@@ -13,13 +13,14 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable
 
 from fastapi import BackgroundTasks, FastAPI, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app import rag
-from app.agent import answer
+from app.agent import answer, stream_reply
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
+from app.connectors import openai_compat
 from app.connectors import twilio_whatsapp as twilio
 from app.connectors.common import InboundMessage
 
@@ -175,6 +176,54 @@ async def twilio_webhook(request: Request, background: BackgroundTasks) -> Respo
         content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
         media_type="text/xml",
     )
+
+
+# --------------------------------------------------------------------------
+# OpenAI-compatible (web frontend, e.g. Open WebUI)
+# --------------------------------------------------------------------------
+
+
+def _unauthorized() -> JSONResponse:
+    return JSONResponse(status_code=401, content=openai_compat.unauthorized_response())
+
+
+@app.get("/v1/models")
+def list_models(request: Request):
+    if not openai_compat.is_authorized(request.headers.get("authorization")):
+        return _unauthorized()
+    return openai_compat.models_payload()
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """OpenAI-compatible chat endpoint for the web frontend.
+
+    Meant to be reachable only from inside the Docker network (see the
+    README) — unlike the WhatsApp/Twilio webhooks above, which have no
+    choice but to be public, this one never needs its own public hostname.
+    Stateless per call: see app.agent's module docstring for why this uses
+    stream_reply/build_stateless_graph rather than answer()/build_graph().
+    """
+
+    if not openai_compat.is_authorized(request.headers.get("authorization")):
+        return _unauthorized()
+
+    body = await request.json()
+    messages = openai_compat.parse_messages(body)
+
+    if body.get("stream"):
+        return StreamingResponse(
+            openai_compat.stream_sse(stream_reply(messages)),
+            media_type="text/event-stream",
+        )
+
+    try:
+        content = "".join(stream_reply(messages))
+    except Exception:
+        logger.exception("agent failed for a web chat request")
+        content = FAILURE_REPLY
+
+    return openai_compat.completion_payload(content)
 
 
 # --------------------------------------------------------------------------

@@ -112,5 +112,8 @@ class Settings:
     def meta_app_secret(self) -> str:
         return _require("META_APP_SECRET")
 
+    def openai_compat_api_key(self) -> str:
+        return _require("OPENAI_COMPAT_API_KEY")
+
 
 settings = Settings()

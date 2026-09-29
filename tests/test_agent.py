@@ -223,3 +223,103 @@ def test_a_broken_router_fails_open_to_every_tool(monkeypatch):
         assert stub.bound_tool_names == ["rag_search", "news_search", "web_search"]
     finally:
         agent_module.build_graph.cache_clear()
+
+
+class _StatelessStubLLM:
+    """Records the system prompt and full message history call_model built,
+    and returns a fixed reply — via plain .invoke(), matching call_model's
+    real code exactly (it never calls .stream() itself).
+
+    LangGraph's stream_mode="messages" only splits a reply into multiple
+    token-level chunks when the underlying provider truly streams — a stub's
+    .invoke() always comes back as exactly one chunk (verified empirically:
+    a real Groq call under the same stream_mode does arrive in several
+    pieces, a stub's doesn't). Good enough here to test stream_reply's
+    filtering and wiring; real incremental streaming is what the manual
+    verification against Groq during development actually proved, not
+    something these stub-based tests can demonstrate on their own.
+    """
+
+    def __init__(self, reply_text="stub reply"):
+        self.reply_text = reply_text
+        self.seen_system_prompt = None
+        self.seen_message_count = None
+
+    def with_structured_output(self, schema):
+        class _Router:
+            def invoke(self, messages):
+                return schema(choice="rag")
+
+        return _Router()
+
+    def bind_tools(self, tools):
+        outer = self
+
+        class _Bound:
+            def invoke(self, messages):
+                outer.seen_system_prompt = messages[0].content
+                outer.seen_message_count = len(messages) - 1  # exclude the system message
+                return AIMessage(content=outer.reply_text)
+
+        return _Bound()
+
+
+def test_stream_reply_forwards_the_full_message_history(monkeypatch):
+    stub = _StatelessStubLLM()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_stateless_graph.cache_clear()
+
+    from langchain_core.messages import HumanMessage
+
+    history = [
+        HumanMessage(content="hello"),
+        AIMessage(content="hi there"),
+        HumanMessage(content="tell me more"),
+    ]
+    chunks = list(agent_module.stream_reply(history))
+
+    assert "".join(chunks) == "stub reply"
+    assert stub.seen_message_count == len(history)
+    agent_module.build_stateless_graph.cache_clear()
+
+
+def test_stream_reply_uses_the_web_prompt_not_whatsapps(monkeypatch):
+    stub = _StatelessStubLLM()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_stateless_graph.cache_clear()
+
+    from langchain_core.messages import HumanMessage
+
+    list(agent_module.stream_reply([HumanMessage(content="hi")]))
+
+    assert "standard Markdown" in stub.seen_system_prompt
+    assert "WhatsApp" not in stub.seen_system_prompt
+    agent_module.build_stateless_graph.cache_clear()
+
+
+def test_stream_reply_never_touches_the_checkpoint_db(monkeypatch, tmp_path):
+    """The stateless graph must never accumulate rows in CHECKPOINT_DB —
+    each web request would otherwise be one more dead thread_id forever,
+    since (unlike WhatsApp's ~5 phone numbers) there's no natural cap on
+    how many web requests come in."""
+
+    import sqlite3
+
+    from langchain_core.messages import HumanMessage
+
+    db_path = tmp_path / "checkpoints.sqlite"
+    monkeypatch.setattr(settings, "checkpoint_db", str(db_path))
+    stub = _StatelessStubLLM()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_stateless_graph.cache_clear()
+
+    # Force the sqlite file and its schema to actually exist first.
+    agent_module._build_checkpointer()
+    before = sqlite3.connect(db_path).execute("select count(*) from checkpoints").fetchone()[0]
+
+    for _ in range(3):
+        list(agent_module.stream_reply([HumanMessage(content="hi")]))
+
+    after = sqlite3.connect(db_path).execute("select count(*) from checkpoints").fetchone()[0]
+    assert before == after == 0
+    agent_module.build_stateless_graph.cache_clear()
