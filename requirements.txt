@@ -19,3 +19,11 @@ twilio
 # cost, and much lighter than torch/sentence-transformers.
 fastembed
 pypdf
+
+# Voice: the groq SDK was only ever a transitive dependency of
+# langchain-groq before this; pinning it directly since app/voice.py now
+# calls its audio.transcriptions/audio.speech endpoints straight, not
+# through LangChain. Actual Opus encoding is done by ffmpeg (a system
+# package — see the Dockerfile — not a Python one; no pure-Python Opus
+# encoder is worth trusting over it).
+groq

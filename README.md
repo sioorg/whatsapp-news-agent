@@ -35,10 +35,11 @@ switch to misconfigure:
 | [app/llm.py](app/llm.py) | Chat model factory — Groq or Anthropic |
 | [app/rag.py](app/rag.py) | Local knowledge store — LangGraph `SqliteStore` + local embeddings |
 | [app/weather.py](app/weather.py) | Live weather via Open-Meteo — free, keyless |
+| [app/voice.py](app/voice.py) | Speech-to-text/text-to-speech via Groq, plus the ffmpeg conversion voice replies need |
 | [app/tools.py](app/tools.py) | `rag_search` (local), Tavily's `news_search`/`web_search`, `get_weather` |
 | [app/agent.py](app/agent.py) | LangGraph graph — router + agent/tools loop + per-sender memory |
 | [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both WhatsApp connectors |
-| [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send, payload parsing, HMAC signature |
+| [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send/receive, media upload/download, HMAC signature |
 | [app/connectors/twilio_whatsapp.py](app/connectors/twilio_whatsapp.py) | Twilio send, form parsing, signature |
 | [app/connectors/openai_compat.py](app/connectors/openai_compat.py) | OpenAI-style message conversion, `/v1/models`, SSE streaming |
 | [app/main.py](app/main.py) | FastAPI webhooks, `/v1/*`, `/chat` test endpoint, RAG model warm-up |
@@ -528,6 +529,78 @@ openssl rand -hex 32
    your Groq/Tavily quota, which has no natural cap the way WhatsApp's
    5-verified-recipient test-number limit does.
 
+## Voice
+
+[app/voice.py](app/voice.py) adds speech-to-text and text-to-speech, shared
+by WhatsApp (a full round trip: send a voice note, get one back) and the web
+connector (backend `/v1/audio/*` endpoints, for when Open WebUI's built-in
+browser voice isn't what you want — see below).
+
+**Models — pinned to what's actually live, not what docs/search describe.**
+Groq's TTS lineup changed recently: `playai-tts` is decommissioned, and the
+current model is `canopylabs/orpheus-v1-english`, which has a much narrower
+voice/format list than the old one. Both this and `whisper-large-v3` need to
+be individually enabled at **console.groq.com/settings/project/limits** (the
+same project-level allowlist as the chat model — see "Model availability"
+below) — the TTS model separately needs its terms accepted at
+**console.groq.com/playground?model=canopylabs%2Forpheus-v1-english**. Until
+both are done, transcription/synthesis calls fail with `model_permission_
+blocked_project` or `model_terms_required`.
+
+| | Model | Notes |
+| --- | --- | --- |
+| STT | `whisper-large-v3` | Free tier: 2,000 requests/day, ~8h audio/day |
+| TTS | `canopylabs/orpheus-v1-english` | Paid, per character (~$50/1M chars) — one of: `autumn`, `diana`, `hannah`, `austin`, `daniel`, `troy` |
+
+**A real format conversion is unavoidable for WhatsApp, not optional.**
+Verified directly, not assumed:
+- Groq's TTS model only actually outputs `wav`, despite the SDK's type hint
+  listing more formats.
+- WhatsApp's Cloud API doesn't accept `audio/wav` for outbound messages at
+  all, and of what it does accept, only `audio/ogg;codecs=opus` renders as a
+  real, playable voice-note bubble — everything else shows as a generic file
+  attachment.
+
+So every synthesized reply goes through **ffmpeg** (`wav` → 16kHz mono
+Opus/Ogg, a real system dependency — see the Dockerfile, not a Python
+package: no pure-Python Opus encoder is worth trusting over it). Confirmed
+end to end by sending a real message to a real number and checking it
+played back correctly, not just that the conversion produced a
+plausible-looking file.
+
+**WhatsApp inbound is handled in two stages, not one.** A voice note's
+download and transcription is real network work (Meta, then Groq) that's
+too slow to do while `meta_whatsapp.parse_inbound` is still parsing the
+webhook — that function runs synchronously, before Meta's retry timeout.
+So `parse_inbound` only records the voice note's media id
+(`InboundMessage.audio_media_id`); `main.py`'s `_handle_message` downloads
+and transcribes it in the background task everything else (the LLM call,
+Tavily, TTS) already runs in. If transcription fails, the person gets a
+plain text explanation rather than the agent running on empty input.
+
+**A failed voice reply falls back to text, never silence.** If synthesis or
+the send itself fails, `_handle_message` logs it and sends the same reply as
+plain text instead of leaving the question unanswered.
+
+**The web side has two independent voice paths, and you likely only need
+one.** Open WebUI ships its own browser-based voice (Settings → Audio →
+Web API) — free, zero backend work, using whatever your browser/OS
+provides. `/v1/audio/transcriptions` and `/v1/audio/speech` exist for
+configuring Open WebUI to use *this* backend instead, so voice quality is
+identical to the WhatsApp side (the same Groq models) rather than varying
+by browser. Same auth as `/v1/chat/completions` — see that section above
+for why these routes are public-hostname-reachable and a real
+`OPENAI_COMPAT_API_KEY` matters.
+
+**Testing:** the default `pytest` layer mocks every Groq call —
+[tests/test_voice.py](tests/test_voice.py) fakes the client entirely for
+the STT/TTS wrapper logic, but runs **real ffmpeg** for the conversion step
+(a local, deterministic, offline operation, unlike a network call — skipped
+gracefully if ffmpeg isn't installed). One `integration`-marked test
+synthesizes real speech then transcribes that same audio back, checking
+recognizable words survived the round trip — no OS-specific tooling or
+committed audio fixture needed for that.
+
 ## Behaviour notes
 
 - **Why the reply is async.** Twilio times the webhook out at ~15s, and a
@@ -544,14 +617,18 @@ openssl rand -hex 32
   above. One person's search can answer someone else's later question.
 - **Long replies** are split on line boundaries into 1500-char chunks, under
   WhatsApp's 1600-char cap.
-- **Non-text events** (delivery receipts, media-only messages) return 204 and
-  are ignored.
+- **Non-text, non-audio events** (delivery receipts, images, documents,
+  etc.) return 200/204 and are ignored — see [Voice](#voice) above for the
+  one exception: Meta audio messages are transcribed, not ignored. Twilio's
+  connector still ignores everything but text; voice was only built for
+  Meta.
 
 ## Model availability
 
 `GROQ_MODEL` defaults to `qwen/qwen3.8-27b`. Groq enables different models per
 project — if you get a 403 `model_permission_blocked_project`, check which
-models your project allows:
+models your project allows. The same restriction applies to the STT/TTS
+models [Voice](#voice) uses; see that section for both of them.
 
 ```bash
 .venv/bin/python -c "

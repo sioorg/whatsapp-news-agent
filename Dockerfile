@@ -10,7 +10,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Dependencies first so code edits don't invalidate the install layer.
+# ffmpeg: converts Groq's TTS output (WAV) to Ogg/Opus, the one outbound
+# audio format WhatsApp's Cloud API renders as a real, playable voice-note
+# bubble rather than a generic file attachment (verified directly — see
+# app/voice.py). A system package, not a Python one: no pure-Python Opus
+# encoder is worth trusting over it. Installed before the pip layer since
+# it never changes with app code, keeping that layer's cache valid longer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Dependencies next so code edits don't invalidate the install layer.
 COPY requirements.lock.txt ./
 RUN pip install --no-cache-dir -r requirements.lock.txt
 

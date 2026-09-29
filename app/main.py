@@ -1,10 +1,11 @@
-"""FastAPI service exposing the WhatsApp webhooks.
+"""FastAPI service exposing the WhatsApp webhooks and the web connector.
 
-Two providers are wired up, each on its own path. The route decides which
-connector sends the reply, so there is no global provider switch to get wrong:
+Each connector gets its own path, so there is no global provider switch to
+get wrong:
 
   /webhook/meta      Meta WhatsApp Cloud API   (free-form replies, free tier)
   /webhook/whatsapp  Twilio                    (needs an upgraded account)
+  /v1/*              OpenAI-compatible         (web frontend, e.g. Open WebUI)
 """
 
 import json
@@ -12,11 +13,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable
 
-from fastapi import BackgroundTasks, FastAPI, Request, Response
+from fastapi import BackgroundTasks, FastAPI, File, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
-from app import rag
+from app import rag, voice
 from app.agent import answer, stream_reply
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
@@ -54,6 +55,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="WhatsApp News Agent", lifespan=_lifespan)
 
 FAILURE_REPLY = "Sorry, something went wrong fetching that news. Try again in a moment."
+VOICE_FAILURE_REPLY = "Sorry, I couldn't understand that voice message. Try again, or type instead."
 
 
 @app.get("/health")
@@ -61,8 +63,37 @@ def health() -> dict:
     return {"status": "ok", "llm_provider": settings.llm_provider}
 
 
-def _handle_message(message: InboundMessage, send: Callable[[str, str], None]) -> None:
-    """Run the agent and send the reply. Executed off the webhook request."""
+def _handle_message(
+    message: InboundMessage,
+    send_text: Callable[[str, str], None],
+    send_voice: Callable[[str, bytes], None] | None = None,
+) -> None:
+    """Run the agent and send the reply. Executed off the webhook request.
+
+    A voice note arrives here with an empty ``body`` and ``audio_media_id``
+    set (see meta_whatsapp.parse_inbound for why the download/transcription
+    happens here, in the background task, rather than synchronously while
+    parsing the webhook). If transcription fails, there's no text to answer
+    with, so this replies with a plain explanation and stops rather than
+    calling the agent on empty input.
+
+    ``send_voice`` is only ever passed for Meta (Twilio has no voice-send
+    support). If the original message was voice, replying with voice is
+    attempted first; any failure there — synthesis or the send itself —
+    falls back to a text reply rather than leaving the user with nothing.
+    """
+
+    if message.audio_media_id and not message.body:
+        try:
+            audio_bytes = meta.download_media(message.audio_media_id)
+            message.body = voice.transcribe(audio_bytes)
+        except Exception:
+            logger.exception("failed to transcribe voice note from %s", message.sender)
+            try:
+                send_text(message.sender, VOICE_FAILURE_REPLY)
+            except Exception:
+                logger.exception("failed to send transcription-failure reply to %s", message.sender)
+            return
 
     logger.info("handling message from %s: %s", message.sender, message.body[:80])
 
@@ -72,8 +103,18 @@ def _handle_message(message: InboundMessage, send: Callable[[str, str], None]) -
         logger.exception("agent failed for %s", message.sender)
         reply = FAILURE_REPLY
 
+    if message.reply_as_voice and send_voice is not None:
+        try:
+            send_voice(message.sender, voice.synthesize(reply))
+            return
+        except Exception:
+            logger.exception(
+                "failed to synthesize/send a voice reply to %s, falling back to text",
+                message.sender,
+            )
+
     try:
-        send(message.sender, reply)
+        send_text(message.sender, reply)
     except Exception:
         logger.exception("failed to send reply to %s", message.sender)
 
@@ -133,7 +174,7 @@ async def meta_webhook(request: Request, background: BackgroundTasks) -> Respons
         return Response(status_code=200)
 
     for message in messages:
-        background.add_task(_handle_message, message, meta.send_message)
+        background.add_task(_handle_message, message, meta.send_message, meta.send_voice_message)
 
     return Response(status_code=200)
 
@@ -224,6 +265,52 @@ async def chat_completions(request: Request):
         content = FAILURE_REPLY
 
     return openai_compat.completion_payload(content)
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(request: Request, file: UploadFile = File(...)):
+    """OpenAI-compatible speech-to-text, for Open WebUI's voice input when
+    it's configured to use a backend engine rather than its own built-in
+    browser Web API option (see the README)."""
+
+    if not openai_compat.is_authorized(request.headers.get("authorization")):
+        return _unauthorized()
+
+    audio_bytes = await file.read()
+
+    try:
+        text = voice.transcribe(audio_bytes, filename=file.filename or "audio.webm")
+    except Exception:
+        logger.exception("transcription failed for a web request")
+        return JSONResponse(
+            status_code=500, content={"error": {"message": "transcription failed"}}
+        )
+
+    return {"text": text}
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(request: Request):
+    """OpenAI-compatible text-to-speech, for Open WebUI's voice output when
+    it's configured to use a backend engine rather than its own built-in
+    browser Web API option (see the README). Returns raw Ogg/Opus bytes,
+    the same format sent to WhatsApp."""
+
+    if not openai_compat.is_authorized(request.headers.get("authorization")):
+        return _unauthorized()
+
+    body = await request.json()
+    text = body.get("input", "")
+
+    try:
+        audio_bytes = voice.synthesize(text)
+    except Exception:
+        logger.exception("speech synthesis failed for a web request")
+        return JSONResponse(
+            status_code=500, content={"error": {"message": "speech synthesis failed"}}
+        )
+
+    return Response(content=audio_bytes, media_type="audio/ogg")
 
 
 # --------------------------------------------------------------------------

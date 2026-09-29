@@ -160,3 +160,25 @@ def test_a_repeated_question_is_answered_from_the_local_cache():
     assert "rag_search" in second_tools, (
         "a repeated question should hit the local cache, not just the web again"
     )
+
+
+def test_voice_round_trip_recovers_recognizable_text():
+    """Synthesizes real speech, then transcribes that same audio back —
+    exercises both real Groq models (Whisper and Orpheus) and the real
+    ffmpeg conversion, with no OS-specific tooling or committed audio
+    fixture needed. Loose on purpose, like the rest of this file: speech
+    synthesis/recognition isn't lossless, so this checks recognizable words
+    survived the round trip, not an exact match.
+    """
+
+    from app.voice import synthesize, transcribe
+
+    original = "The weather today is sunny with a chance of rain this evening"
+    audio = synthesize(original)
+
+    assert audio[:4] == b"OggS", "synthesize() must return real Ogg/Opus audio"
+
+    transcribed = transcribe(audio, filename="roundtrip.ogg").lower()
+
+    for word in ("weather", "sunny", "rain"):
+        assert word in transcribed, f"{word!r} did not survive the round trip: {transcribed!r}"

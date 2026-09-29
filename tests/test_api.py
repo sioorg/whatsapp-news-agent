@@ -127,6 +127,67 @@ def test_a_send_failure_does_not_crash_the_worker(client, meta_payload):
     assert response.status_code == 200
 
 
+# --- Meta inbound voice ----------------------------------------------------
+
+
+def test_inbound_voice_message_is_transcribed_then_answered(client, meta_audio_payload):
+    """The transcribed text, not anything about the audio itself, is what
+    reaches the agent — and the reply goes out as voice, not text, matching
+    how the question arrived."""
+
+    sent_voice = []
+
+    with patch("app.connectors.meta_whatsapp.download_media", return_value=b"raw-audio-bytes"):
+        with patch("app.voice.transcribe", return_value="what's the weather in Paris") as transcribe:
+            with patch("app.main.answer", return_value="It's sunny.") as answer:
+                with patch("app.voice.synthesize", return_value=b"synthesized-audio"):
+                    with patch(
+                        "app.connectors.meta_whatsapp.send_voice_message",
+                        lambda to, audio: sent_voice.append((to, audio)),
+                    ):
+                        response = client.post("/webhook/meta", json=meta_audio_payload)
+
+    assert response.status_code == 200
+    transcribe.assert_called_once_with(b"raw-audio-bytes")
+    assert answer.call_args.args[0] == "what's the weather in Paris"
+    assert sent_voice == [("919902245562", b"synthesized-audio")]
+
+
+def test_a_failed_transcription_gets_a_text_explanation_not_silence(client, meta_audio_payload):
+    sent_text = []
+
+    with patch("app.connectors.meta_whatsapp.download_media", side_effect=RuntimeError("meta down")):
+        with patch(
+            "app.connectors.meta_whatsapp.send_message",
+            lambda to, body: sent_text.append(body),
+        ):
+            response = client.post("/webhook/meta", json=meta_audio_payload)
+
+    assert response.status_code == 200
+    assert len(sent_text) == 1
+    assert "couldn't understand" in sent_text[0].lower()
+
+
+def test_a_failed_voice_reply_falls_back_to_text(client, meta_audio_payload):
+    """Losing the ability to synthesize/send voice must not mean losing the
+    answer entirely."""
+
+    sent_text = []
+
+    with patch("app.connectors.meta_whatsapp.download_media", return_value=b"raw-audio-bytes"):
+        with patch("app.voice.transcribe", return_value="hi"):
+            with patch("app.main.answer", return_value="the real answer"):
+                with patch("app.voice.synthesize", side_effect=RuntimeError("tts down")):
+                    with patch(
+                        "app.connectors.meta_whatsapp.send_message",
+                        lambda to, body: sent_text.append(body),
+                    ):
+                        response = client.post("/webhook/meta", json=meta_audio_payload)
+
+    assert response.status_code == 200
+    assert sent_text == ["the real answer"]
+
+
 # --- Meta signature verification ------------------------------------------
 
 
@@ -298,3 +359,59 @@ def test_chat_completions_drops_the_client_system_message(client):
     passed_messages = stream_reply.call_args.args[0]
     assert len(passed_messages) == 1
     assert passed_messages[0].content == "hi"
+
+
+# --- Web voice endpoints -----------------------------------------------------
+
+
+def test_audio_transcriptions_requires_authorization(client):
+    response = client.post("/v1/audio/transcriptions", files={"file": ("x.wav", b"fake", "audio/wav")})
+
+    assert response.status_code == 401
+
+
+def test_audio_transcriptions_returns_the_transcribed_text(client):
+    with patch("app.voice.transcribe", return_value="hello there") as transcribe:
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers=_AUTH,
+            files={"file": ("note.wav", b"fake-audio-bytes", "audio/wav")},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "hello there"}
+    assert transcribe.call_args.kwargs["filename"] == "note.wav"
+
+
+def test_audio_transcriptions_returns_500_on_failure(client):
+    with patch("app.voice.transcribe", side_effect=RuntimeError("groq down")):
+        response = client.post(
+            "/v1/audio/transcriptions",
+            headers=_AUTH,
+            files={"file": ("note.wav", b"fake-audio-bytes", "audio/wav")},
+        )
+
+    assert response.status_code == 500
+
+
+def test_audio_speech_requires_authorization(client):
+    response = client.post("/v1/audio/speech", json={"input": "hello"})
+
+    assert response.status_code == 401
+
+
+def test_audio_speech_returns_raw_audio_bytes(client):
+    with patch("app.voice.synthesize", return_value=b"fake-ogg-bytes") as synthesize:
+        response = client.post("/v1/audio/speech", headers=_AUTH, json={"input": "hello there"})
+
+    assert response.status_code == 200
+    assert response.content == b"fake-ogg-bytes"
+    assert response.headers["content-type"] == "audio/ogg"
+    assert synthesize.call_args.args[0] == "hello there"
+
+
+def test_audio_speech_returns_500_on_failure(client):
+    with patch("app.voice.synthesize", side_effect=RuntimeError("groq down")):
+        response = client.post("/v1/audio/speech", headers=_AUTH, json={"input": "hello"})
+
+    assert response.status_code == 500

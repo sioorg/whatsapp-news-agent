@@ -15,6 +15,18 @@ class InboundMessage:
     sender: str
     body: str
     profile_name: str = ""
+    # True when this message arrived as a voice note — signals that the
+    # reply should be synthesized back to voice too, matching how the
+    # person asked (see main.py's _handle_message).
+    reply_as_voice: bool = False
+    # Set instead of ``body`` for an inbound voice note (Meta only, for
+    # now): downloading and transcribing it is a real network round trip,
+    # too slow to do inside parse_inbound, which runs synchronously in the
+    # webhook request before Meta's retry timeout. main.py's
+    # _handle_message does that step itself, in the background task
+    # everything else already runs in, filling ``body`` in before calling
+    # the agent.
+    audio_media_id: str | None = None
 
 
 def split_message(text: str, limit: int) -> list[str]:

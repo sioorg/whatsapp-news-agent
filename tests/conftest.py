@@ -77,3 +77,41 @@ def meta_payload() -> dict:
             }
         ],
     }
+
+
+@pytest.fixture
+def meta_audio_payload() -> dict:
+    """A realistically shaped inbound voice message from the Cloud API."""
+
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": "1234567890"},
+                            "contacts": [
+                                {"profile": {"name": "Sio"}, "wa_id": "919902245562"}
+                            ],
+                            "messages": [
+                                {
+                                    "from": "919902245562",
+                                    "id": "wamid.VOICE",
+                                    "timestamp": "1700000000",
+                                    "type": "audio",
+                                    "audio": {
+                                        "id": "MEDIA123",
+                                        "mime_type": "audio/ogg; codecs=opus",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }
