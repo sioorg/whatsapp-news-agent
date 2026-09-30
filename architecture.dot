@@ -60,6 +60,7 @@ digraph WhatsAppNewsAgent {
 <tr><td align="left">GET /v1/models, POST /v1/chat/completions</td></tr>
 <tr><td align="left">POST /v1/audio/transcriptions, /v1/audio/speech</td></tr>
 <tr><td align="left">POST /chat (local test), GET /health</td></tr>
+<tr><td align="left">GET /metrics (Prometheus, Bearer auth)</td></tr>
 </table>>, shape=box, fillcolor="#ffffff"];
 
         subgraph cluster_connectors {
@@ -69,7 +70,7 @@ digraph WhatsAppNewsAgent {
             fillcolor="#e8e0f2";
             fontsize=12;
 
-            meta_conn [label="meta_whatsapp.py\nGraph API v21.0\nsend/receive, media\nupload/download, HMAC (X-Hub-Signature-256)", fillcolor="#d9d2e9"];
+            meta_conn [label="meta_whatsapp.py\nGraph API v21.0\nsend/receive text, voice, image\ntyping indicator, media upload/download\nHMAC (X-Hub-Signature-256)", fillcolor="#d9d2e9"];
             twilio_conn [label="twilio_whatsapp.py\n(dormant — needs an\nupgraded Twilio account)", fillcolor="#e6e0ee"];
             openai_conn [label="openai_compat.py\nmodel id: \"OneAgent\"\nOPENAI_COMPAT_API_KEY bearer auth\nSSE streaming", fillcolor="#d9d2e9"];
         }
@@ -123,11 +124,16 @@ digraph WhatsAppNewsAgent {
         rag_tool [label="rag_search\noffered on: rag, both", fillcolor="#e2eec6"];
         news_tool [label="news_search / web_search\noffered on: web, both", fillcolor="#e2eec6"];
         weather_tool [label="get_weather\noffered on: every route\nparams: unit, days (1-7)", fillcolor="#e2eec6"];
+        image_tool [label="generate_image\noffered on: every route", fillcolor="#e2eec6"];
+
+        image_note [label="Image bytes ride on ToolMessage.artifact,\nnever as text to the LLM. app.agent.answer()/\nstream_reply() extract it (scoped to the current\nturn only) into a contextvars side channel —\npop_pending_image() — that meta_conn/openai_conn\nread right after, bypassing call_model entirely.", shape=note, fillcolor="#fff2cc", fontsize=10];
+        image_tool -> image_note [style=dotted, dir=none, constraint=false];
     }
 
     tool_node -> rag_tool;
     tool_node -> news_tool;
     tool_node -> weather_tool;
+    tool_node -> image_tool;
 
     // ---------------------------------------------------------------
     // Data / voice
@@ -164,6 +170,8 @@ digraph WhatsAppNewsAgent {
         tavily [label="Tavily Search API\nnews_search (topic=news)\nweb_search (topic=general)", fillcolor="#f9cb9c"];
         openmeteo [label="Open-Meteo API\ngeocoding-api + api.open-meteo.com\nfree, no key", fillcolor="#f9cb9c"];
         meta_graph [label="Meta Graph API v21.0\ngraph.facebook.com\nmessages, media, subscribed_apps", fillcolor="#f9cb9c"];
+        pollinations [label="Pollinations.ai\nIMAGE_PROVIDER=pollinations (default)\nfree, keyless — returns JPEG", fillcolor="#f9cb9c"];
+        openai_images [label="OpenAI Images API\nIMAGE_PROVIDER=openai (opt-in)\ngpt-image-1, paid — returns PNG", fillcolor="#f9cb9c", style="rounded,filled,dashed"];
     }
 
     call_model -> groq [label="chat + route\nclassification"];
@@ -171,6 +179,8 @@ digraph WhatsAppNewsAgent {
     news_tool -> tavily;
     weather_tool -> openmeteo;
     meta_conn -> meta_graph;
+    image_tool -> pollinations [label="default"];
+    image_tool -> openai_images [label="opt-in", style=dashed];
 
     // ---------------------------------------------------------------
     // Deployment / CI-CD
@@ -184,7 +194,7 @@ digraph WhatsAppNewsAgent {
 
         github [label="GitHub: sioorg/whatsapp-news-agent\nshared workflows: sioorg/ci-workflows@v1\n(python-test.yml, docker-deploy.yml,\nagent-eval.yml)", fillcolor="#c9e6d0"];
         runner [label="Self-hosted runner\nname: ai-ubuntu-server\n(org-level, labels: self-hosted,Linux,X64)", fillcolor="#c9e6d0"];
-        docker [label="docker compose\nhost path: /home/mysio/my-apps/\nwhatsapp-news-agent\nvolume: agent-data\nnetwork: edge (external)", fillcolor="#c9e6d0"];
+        docker [label="docker compose\nhost path: /home/mysio/my-apps/\nwhatsapp-news-agent\nvolume: agent-data\nnetworks: edge, monitoring (both external)", fillcolor="#c9e6d0"];
         telegram [label="Telegram bot (@BotFather)\nsendMessage → TELEGRAM_CHAT_ID\ndeploy + nightly-eval alerts", fillcolor="#c9e6d0"];
         scripts [label="Maintenance CLIs (docker exec)\nscripts/ingest_docs.py\nscripts/reset_thread.py", shape=note, fillcolor="#fff2cc", fontsize=10];
     }
@@ -194,6 +204,23 @@ digraph WhatsAppNewsAgent {
     docker -> routes [label="builds & runs this\ncontainer (docker compose\nup -d --build)"];
     runner -> telegram [label="deploy/eval result"];
     docker -> scripts [style=dotted, dir=none];
+
+    // ---------------------------------------------------------------
+    // Monitoring — separate repo/project, shares the `monitoring` network
+    // ---------------------------------------------------------------
+    subgraph cluster_monitoring {
+        label="Monitoring — sioorg/monitoring (separate repo)";
+        style="rounded,filled";
+        color="#b8ddc0";
+        fillcolor="#eaf7ee";
+        fontsize=13;
+
+        prometheus [label="Prometheus\nscrapes GET /metrics every 15s\nBearer auth: METRICS_API_KEY\n(credentials_file, gitignored secret)", fillcolor="#c9e6d0"];
+        grafana [label="Grafana\n\"OneAgent Business Dashboard\"\n(auto-provisioned)", fillcolor="#c9e6d0"];
+    }
+
+    routes -> prometheus [label="GET /metrics", style=dashed, constraint=false];
+    prometheus -> grafana;
 
     { rank=same; whatsapp_user; openwebui; }
 }
