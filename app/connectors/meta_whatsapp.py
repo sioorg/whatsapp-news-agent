@@ -81,7 +81,12 @@ def parse_inbound(payload: dict) -> list[InboundMessage]:
                         continue
 
                     messages.append(
-                        InboundMessage(sender=sender, body=body, profile_name=names.get(sender, ""))
+                        InboundMessage(
+                            sender=sender,
+                            body=body,
+                            profile_name=names.get(sender, ""),
+                            message_id=message.get("id"),
+                        )
                     )
 
                 elif msg_type == "audio":
@@ -96,6 +101,7 @@ def parse_inbound(payload: dict) -> list[InboundMessage]:
                             audio_media_id=media_id,
                             reply_as_voice=True,
                             profile_name=names.get(sender, ""),
+                            message_id=message.get("id"),
                         )
                     )
 
@@ -137,6 +143,34 @@ def upload_media(audio_bytes: bytes) -> str:
         raise RuntimeError(f"Meta media upload failed ({response.status_code}): {response.text[:500]}")
 
     return response.json()["id"]
+
+
+def send_typing_indicator(message_id: str) -> None:
+    """Mark an inbound message read and show "typing…" to the sender.
+
+    The Cloud API has no separate "recording audio" indicator, so voice
+    notes get the same typing bubble. WhatsApp clears it after ~25 seconds
+    or as soon as a reply is sent, whichever comes first — callers that
+    need it longer must call this again (see main.py's _typing_keepalive).
+    """
+
+    response = requests.post(
+        _endpoint(),
+        headers={
+            "Authorization": f"Bearer {settings.meta_access_token()}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {"type": "text"},
+        },
+        timeout=TIMEOUT_SECONDS,
+    )
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"Meta typing indicator failed ({response.status_code}): {response.text[:500]}")
 
 
 def send_message(to: str, body: str) -> None:

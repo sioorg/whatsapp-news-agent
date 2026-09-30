@@ -3,6 +3,7 @@ uvicorn[standard]
 python-multipart
 python-dotenv
 pydantic
+prometheus-client
 
 langgraph
 langgraph-checkpoint-sqlite

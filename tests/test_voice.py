@@ -13,6 +13,7 @@ from io import BytesIO
 import pytest
 
 import app.voice as voice
+from app import metrics
 
 
 class _FakeTranscriptions:
@@ -93,6 +94,47 @@ def test_synthesize_accepts_every_documented_voice(monkeypatch):
     for v in voice.TTS_VOICES:
         voice.synthesize("hello", voice=v)
         assert fake.audio.speech.last_call["voice"] == v
+
+
+# --- Metrics (app/metrics.py) — counters are global process state, so
+# these assert a delta rather than an absolute value. ------------------
+
+
+def test_transcribe_records_a_successful_api_call(monkeypatch):
+    fake = _FakeGroqClient()
+    monkeypatch.setattr(voice, "_client", lambda: fake)
+
+    before = metrics.API_CALLS.labels(api="groq_stt", status="success")._value.get()
+    voice.transcribe(b"audio-bytes")
+
+    assert metrics.API_CALLS.labels(api="groq_stt", status="success")._value.get() == before + 1
+
+
+def test_transcribe_records_a_failed_api_call(monkeypatch):
+    class _BoomTranscriptions:
+        def create(self, **kwargs):
+            raise RuntimeError("groq down")
+
+    fake = _FakeGroqClient(transcriptions=_BoomTranscriptions())
+    monkeypatch.setattr(voice, "_client", lambda: fake)
+
+    before = metrics.API_CALLS.labels(api="groq_stt", status="error")._value.get()
+    try:
+        voice.transcribe(b"audio-bytes")
+    except RuntimeError:
+        pass
+
+    assert metrics.API_CALLS.labels(api="groq_stt", status="error")._value.get() == before + 1
+
+
+def test_synthesize_wav_records_a_successful_api_call(monkeypatch):
+    fake = _FakeGroqClient()
+    monkeypatch.setattr(voice, "_client", lambda: fake)
+
+    before = metrics.API_CALLS.labels(api="groq_tts", status="success")._value.get()
+    voice._synthesize_wav("hello", "daniel")
+
+    assert metrics.API_CALLS.labels(api="groq_tts", status="success")._value.get() == before + 1
 
 
 def _tiny_wav() -> bytes:

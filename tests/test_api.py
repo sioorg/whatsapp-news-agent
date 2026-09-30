@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import re
 from unittest.mock import patch
 
 import pytest
@@ -270,6 +271,7 @@ def test_chat_endpoint(client):
 from app.config import settings  # noqa: E402
 
 _AUTH = {"Authorization": f"Bearer {settings.openai_compat_api_key()}"}
+_METRICS_AUTH = {"Authorization": f"Bearer {settings.metrics_api_key()}"}
 
 
 def test_models_requires_authorization(client):
@@ -415,3 +417,63 @@ def test_audio_speech_returns_500_on_failure(client):
         response = client.post("/v1/audio/speech", headers=_AUTH, json={"input": "hello"})
 
     assert response.status_code == 500
+
+
+# --- Metrics endpoint -------------------------------------------------------
+
+
+def test_metrics_requires_authorization(client):
+    response = client.get("/metrics")
+
+    assert response.status_code == 401
+
+
+def test_metrics_rejects_a_wrong_key(client):
+    response = client.get("/metrics", headers={"Authorization": "Bearer wrong"})
+
+    assert response.status_code == 401
+
+
+def test_metrics_returns_prometheus_text(client):
+    response = client.get("/metrics", headers=_METRICS_AUTH)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    # A counter's family line is always present, even with zero samples so far.
+    assert "messages_received_total" in response.text
+
+
+def test_a_handled_message_shows_up_in_metrics(client, meta_payload):
+    """Counters are global process state shared across every test in this
+    file (many earlier ones already hit /webhook/meta), so this checks a
+    non-zero value rather than an exact count."""
+
+    with patch("app.connectors.meta_whatsapp.send_message"):
+        with patch("app.main.answer", return_value="stub reply"):
+            client.post("/webhook/meta", json=meta_payload)
+
+    response = client.get("/metrics", headers=_METRICS_AUTH)
+
+    assert re.search(r'messages_received_total\{channel="meta",user="[0-9a-f]{8}"\} [1-9]', response.text)
+    assert re.search(r'messages_sent_total\{channel="meta"\} [1-9]', response.text)
+
+
+def test_voice_ack_sent_only_when_reply_is_slow(monkeypatch):
+    import time
+
+    from app import main
+    from app.connectors.common import InboundMessage
+
+    monkeypatch.setattr(main, "VOICE_ACK_DELAY_SECONDS", 0.05)
+    monkeypatch.setattr(main, "_process_message", lambda m, t, v, **kwargs: time.sleep(0.2))
+
+    sent = []
+    msg = InboundMessage(sender="91", body="", reply_as_voice=True)
+    main._handle_message(msg, lambda to, body: sent.append(body))
+    assert sent == [main.VOICE_ACK_REPLY]
+
+    sent.clear()
+    monkeypatch.setattr(main, "_process_message", lambda m, t, v, **kwargs: None)
+    main._handle_message(msg, lambda to, body: sent.append(body))
+    time.sleep(0.1)
+    assert sent == []

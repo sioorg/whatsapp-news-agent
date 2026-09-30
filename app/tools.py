@@ -9,7 +9,7 @@ from functools import lru_cache
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
-from app import rag, weather
+from app import metrics, rag, weather
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,10 @@ def rag_search(query: str) -> str:
     result (not an error) if the local store has nothing relevant yet.
     """
 
-    return _format_rag(rag.search(query))
+    metrics.TOOL_CALLS.labels(tool="rag_search").inc()
+    hits = rag.search(query)
+    metrics.RAG_LOOKUPS.labels(result="hit" if hits else "miss").inc()
+    return _format_rag(hits)
 
 
 @tool
@@ -93,13 +96,16 @@ def news_search(query: str) -> str:
     "what's new" style questions. Returns headlines with dates and source URLs.
     """
 
-    response = _client().search(
-        query=query,
-        topic="news",
-        days=settings.tavily_search_days,
-        max_results=settings.tavily_max_results,
-        include_answer=False,
-    )
+    metrics.TOOL_CALLS.labels(tool="news_search").inc()
+
+    with metrics.track_api_call("tavily"):
+        response = _client().search(
+            query=query,
+            topic="news",
+            days=settings.tavily_search_days,
+            max_results=settings.tavily_max_results,
+            include_answer=False,
+        )
 
     results = response.get("results", [])
     _cache_quietly(results)
@@ -114,12 +120,15 @@ def web_search(query: str) -> str:
     lacked the detail needed to answer a follow-up.
     """
 
-    response = _client().search(
-        query=query,
-        topic="general",
-        max_results=settings.tavily_max_results,
-        include_answer=False,
-    )
+    metrics.TOOL_CALLS.labels(tool="web_search").inc()
+
+    with metrics.track_api_call("tavily"):
+        response = _client().search(
+            query=query,
+            topic="general",
+            max_results=settings.tavily_max_results,
+            include_answer=False,
+        )
 
     results = response.get("results", [])
     _cache_quietly(results)
@@ -146,6 +155,7 @@ def get_weather(location: str, unit: str = "celsius", days: int = 1) -> str:
     or "today" questions.
     """
 
+    metrics.TOOL_CALLS.labels(tool="get_weather").inc()
     return weather.get_report(location, unit=unit, days=days)
 
 

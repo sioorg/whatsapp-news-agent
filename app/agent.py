@@ -32,6 +32,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
+from app import metrics
 from app.config import settings
 from app.llm import build_llm
 from app.tools import TOOLS, get_weather, news_search, rag_search, web_search
@@ -178,13 +179,15 @@ def _build_graph_builder() -> StateGraph:
         text = last_human.content if last_human else ""
 
         try:
-            route = llm.with_structured_output(Route).invoke(
-                [SystemMessage(content=ROUTER_PROMPT), HumanMessage(content=text)]
-            )
+            with metrics.track_api_call("llm_router"):
+                route = llm.with_structured_output(Route).invoke(
+                    [SystemMessage(content=ROUTER_PROMPT), HumanMessage(content=text)]
+                )
             choice = route.choice
         except Exception:
             choice = "both"
 
+        metrics.ROUTER_DECISIONS.labels(route=choice).inc()
         return {"route": choice}
 
     def call_model(state: State) -> dict:
@@ -192,7 +195,8 @@ def _build_graph_builder() -> StateGraph:
         prompt_body = state.get("system_prompt") or WHATSAPP_SYSTEM_PROMPT
         system = SystemMessage(content=today_line + prompt_body)
         tools_for_turn = ROUTE_TOOLS.get(state.get("route", "web"), TOOLS)
-        response = llm.bind_tools(tools_for_turn).invoke([system, *state["messages"]])
+        with metrics.track_api_call("llm_answer"):
+            response = llm.bind_tools(tools_for_turn).invoke([system, *state["messages"]])
         return {"messages": [response]}
 
     builder = StateGraph(State)

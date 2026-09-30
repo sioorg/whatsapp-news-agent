@@ -277,3 +277,30 @@ def test_rejects_a_signature_from_a_different_secret(meta_payload):
     wrong = "sha256=" + hmac.new(b"not-the-secret", raw, hashlib.sha256).hexdigest()
 
     assert meta.is_valid_signature(wrong, raw) is False
+
+
+def test_parse_inbound_captures_message_id(meta_payload):
+    meta_payload["entry"][0]["changes"][0]["value"]["messages"][0]["id"] = "wamid.ABC"
+
+    assert meta.parse_inbound(meta_payload)[0].message_id == "wamid.ABC"
+
+
+def test_typing_indicator_payload(monkeypatch):
+    sent = {}
+
+    class Resp:
+        status_code = 200
+
+    def fake_post(url, headers, json, timeout):
+        sent.update(json=json)
+        return Resp()
+
+    monkeypatch.setattr(meta.requests, "post", fake_post)
+    meta.send_typing_indicator("wamid.ABC")
+
+    assert sent["json"] == {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": "wamid.ABC",
+        "typing_indicator": {"type": "text"},
+    }

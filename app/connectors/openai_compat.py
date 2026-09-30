@@ -19,6 +19,7 @@ from typing import Iterator
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 
+from app import metrics
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ def stream_sse(text_chunks: Iterator[str]) -> Iterator[str]:
             yield _chunk(request_id, created, {"content": text}, None)
     except Exception:
         logger.exception("agent failed mid-stream")
+        metrics.AGENT_ERRORS.labels(channel="web").inc()
         yield _chunk(
             request_id,
             created,

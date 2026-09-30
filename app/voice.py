@@ -18,6 +18,7 @@ from pathlib import Path
 
 from groq import Groq
 
+from app import metrics
 from app.config import settings
 
 STT_MODEL = "whisper-large-v3"
@@ -45,25 +46,27 @@ def transcribe(audio_bytes: bytes, filename: str = "audio.ogg") -> str:
     sender in any way.
     """
 
-    result = _client().audio.transcriptions.create(
-        model=STT_MODEL,
-        file=(filename, audio_bytes),
-        response_format="text",
-    )
+    with metrics.track_api_call("groq_stt"):
+        result = _client().audio.transcriptions.create(
+            model=STT_MODEL,
+            file=(filename, audio_bytes),
+            response_format="text",
+        )
     return str(result).strip()
 
 
 def _synthesize_wav(text: str, voice: str) -> bytes:
-    response = _client().audio.speech.create(
-        input=text,
-        model=TTS_MODEL,
-        voice=voice,
-        # Despite the SDK's type hint listing flac/mp3/mulaw/ogg/wav as
-        # valid for *some* Groq TTS model, canopylabs/orpheus-v1-english
-        # itself only actually accepts "wav" — confirmed by trying "ogg"
-        # for real and reading the resulting 400 error.
-        response_format="wav",
-    )
+    with metrics.track_api_call("groq_tts"):
+        response = _client().audio.speech.create(
+            input=text,
+            model=TTS_MODEL,
+            voice=voice,
+            # Despite the SDK's type hint listing flac/mp3/mulaw/ogg/wav as
+            # valid for *some* Groq TTS model, canopylabs/orpheus-v1-english
+            # itself only actually accepts "wav" — confirmed by trying "ogg"
+            # for real and reading the resulting 400 error.
+            response_format="wav",
+        )
     return response.read()
 
 

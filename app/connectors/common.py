@@ -27,6 +27,10 @@ class InboundMessage:
     # everything else already runs in, filling ``body`` in before calling
     # the agent.
     audio_media_id: str | None = None
+    # Provider's id for this inbound message (Meta's ``wamid…``). Needed to
+    # show a typing indicator, which is attached to the message being
+    # answered.
+    message_id: str | None = None
 
 
 def split_message(text: str, limit: int) -> list[str]:

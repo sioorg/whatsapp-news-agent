@@ -51,6 +51,7 @@ orjson==3.12.0
 ormsgpack==1.12.2
 packaging==26.3
 pillow==12.3.0
+prometheus_client==0.26.0
 propcache==0.5.4
 protobuf==7.36.2
 py_rust_stemmers==0.1.8

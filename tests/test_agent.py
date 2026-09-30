@@ -15,6 +15,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from tavily.errors import InvalidAPIKeyError
 
 import app.agent as agent_module
+from app import metrics
 from app.agent import _build_checkpointer
 from app.config import settings
 
@@ -200,6 +201,14 @@ def test_both_route_offers_every_tool(monkeypatch):
         "web_search",
         "get_weather",
     ]
+
+
+def test_router_decision_is_recorded_in_metrics(monkeypatch):
+    before = metrics.ROUTER_DECISIONS.labels(route="rag")._value.get()
+
+    _route_and_get_bound_tools(monkeypatch, "rag")
+
+    assert metrics.ROUTER_DECISIONS.labels(route="rag")._value.get() == before + 1
 
 
 def test_a_broken_router_fails_open_to_every_tool(monkeypatch):

@@ -9,6 +9,8 @@ context — so every call here is a fresh live lookup, always.
 
 import requests
 
+from app import metrics
+
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 TIMEOUT_SECONDS = 10
@@ -156,9 +158,10 @@ def format_report(place: dict, forecast: dict) -> str:
 
 
 def get_report(location: str, *, unit: str = "celsius", days: int = 1) -> str:
-    place = geocode(location)
-    if place is None:
-        return f"Couldn't find a place called '{location}'."
+    with metrics.track_api_call("open_meteo"):
+        place = geocode(location)
+        if place is None:
+            return f"Couldn't find a place called '{location}'."
 
-    forecast = fetch_forecast(place["latitude"], place["longitude"], unit=unit, days=days)
-    return format_report(place, forecast)
+        forecast = fetch_forecast(place["latitude"], place["longitude"], unit=unit, days=days)
+        return format_report(place, forecast)

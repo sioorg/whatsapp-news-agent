@@ -10,14 +10,16 @@ get wrong:
 
 import json
 import logging
-from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable
+import threading
+from contextlib import asynccontextmanager, contextmanager
+from typing import AsyncIterator, Callable, Iterator
 
 from fastapi import BackgroundTasks, FastAPI, File, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
-from app import rag, voice
+from app import metrics, rag, voice
 from app.agent import answer, stream_reply
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
@@ -55,6 +57,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="WhatsApp News Agent", lifespan=_lifespan)
 
 FAILURE_REPLY = "Sorry, something went wrong fetching that news. Try again in a moment."
+VOICE_ACK_REPLY = "🎙️ Got your voice note, preparing a voice reply…"
+# Voice replies take longer (download, transcribe, agent, synthesize, upload),
+# and the Cloud API can't show "recording audio…", so if one is still in
+# flight after this long, say so explicitly.
+VOICE_ACK_DELAY_SECONDS = 5
 VOICE_FAILURE_REPLY = "Sorry, I couldn't understand that voice message. Try again, or type instead."
 
 
@@ -63,10 +70,112 @@ def health() -> dict:
     return {"status": "ok", "llm_provider": settings.llm_provider}
 
 
+def _metrics_authorized(authorization_header: str | None) -> bool:
+    """Same pattern as openai_compat.is_authorized, its own separate secret.
+
+    A dedicated key rather than reusing OPENAI_COMPAT_API_KEY: rotating one
+    shouldn't force rotating Prometheus's scrape config too, and vice
+    versa. Fails closed like that one does — see its docstring."""
+
+    if not authorization_header or not authorization_header.startswith("Bearer "):
+        return False
+    token = authorization_header.removeprefix("Bearer ")
+    try:
+        expected = settings.metrics_api_key()
+    except RuntimeError:
+        return False
+    return token == expected
+
+
+@app.get("/metrics")
+def metrics_endpoint(request: Request) -> Response:
+    """Business metrics for Prometheus — see app/metrics.py for what's
+    tracked and why. Gated the same way /v1/* is: this route shares the
+    public Cloudflare hostname with everything else, no path isolation, and
+    the numbers here (usage volume, error rates) aren't meant to be public."""
+
+    if not _metrics_authorized(request.headers.get("authorization")):
+        return Response(status_code=401)
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# WhatsApp clears a typing indicator after ~25s, so refresh a bit sooner.
+TYPING_REFRESH_SECONDS = 20
+
+
+@contextmanager
+def _typing_keepalive(
+    message: InboundMessage, send_typing: Callable[[str], None] | None
+) -> Iterator[None]:
+    """Show "typing…" to the sender until the block exits.
+
+    Best effort: a failed indicator is logged and never blocks the reply.
+    The indicator also disappears on its own once the reply is sent.
+    """
+
+    if send_typing is None or not message.message_id:
+        yield
+        return
+
+    done = threading.Event()
+
+    def _run() -> None:
+        while not done.is_set():
+            try:
+                send_typing(message.message_id)
+            except Exception:
+                logger.warning("typing indicator failed for %s", message.sender, exc_info=True)
+            done.wait(TYPING_REFRESH_SECONDS)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        done.set()
+
+
 def _handle_message(
     message: InboundMessage,
     send_text: Callable[[str, str], None],
     send_voice: Callable[[str, bytes], None] | None = None,
+    send_typing: Callable[[str], None] | None = None,
+    channel: str = "unknown",
+) -> None:
+    """Run the agent and send the reply, with a typing indicator meanwhile.
+
+    Voice notes additionally get a one-off acknowledgement text if the reply
+    hasn't been sent within VOICE_ACK_DELAY_SECONDS.
+    """
+
+    ack = None
+    if message.reply_as_voice:
+        ack = threading.Timer(
+            VOICE_ACK_DELAY_SECONDS, _send_voice_ack, args=(message, send_text)
+        )
+        ack.daemon = True
+        ack.start()
+
+    try:
+        with _typing_keepalive(message, send_typing):
+            _process_message(message, send_text, send_voice, channel=channel)
+    finally:
+        if ack is not None:
+            ack.cancel()
+
+
+def _send_voice_ack(message: InboundMessage, send_text: Callable[[str, str], None]) -> None:
+    try:
+        send_text(message.sender, VOICE_ACK_REPLY)
+    except Exception:
+        logger.warning("failed to send voice acknowledgement to %s", message.sender, exc_info=True)
+
+
+def _process_message(
+    message: InboundMessage,
+    send_text: Callable[[str, str], None],
+    send_voice: Callable[[str, bytes], None] | None = None,
+    channel: str = "unknown",
 ) -> None:
     """Run the agent and send the reply. Executed off the webhook request.
 
@@ -81,11 +190,20 @@ def _handle_message(
     support). If the original message was voice, replying with voice is
     attempted first; any failure there — synthesis or the send itself —
     falls back to a text reply rather than leaving the user with nothing.
+
+    ``channel`` only feeds Prometheus labels (app/metrics.py) — it changes
+    no behavior here.
     """
 
+    metrics.MESSAGES_RECEIVED.labels(
+        channel=channel, user=metrics.hash_user(message.sender)
+    ).inc()
+
     if message.audio_media_id and not message.body:
+        metrics.VOICE_MESSAGES.labels(direction="in", channel=channel).inc()
         try:
-            audio_bytes = meta.download_media(message.audio_media_id)
+            with metrics.track_api_call("meta_download"):
+                audio_bytes = meta.download_media(message.audio_media_id)
             message.body = voice.transcribe(audio_bytes)
         except Exception:
             logger.exception("failed to transcribe voice note from %s", message.sender)
@@ -98,14 +216,19 @@ def _handle_message(
     logger.info("handling message from %s: %s", message.sender, message.body[:80])
 
     try:
-        reply = answer(message.body, thread_id=message.sender)
+        with metrics.TURN_DURATION.labels(channel=channel).time():
+            reply = answer(message.body, thread_id=message.sender)
     except Exception:
         logger.exception("agent failed for %s", message.sender)
+        metrics.AGENT_ERRORS.labels(channel=channel).inc()
         reply = FAILURE_REPLY
 
     if message.reply_as_voice and send_voice is not None:
         try:
-            send_voice(message.sender, voice.synthesize(reply))
+            with metrics.track_api_call(f"{channel}_send"):
+                send_voice(message.sender, voice.synthesize(reply))
+            metrics.MESSAGES_SENT.labels(channel=channel).inc()
+            metrics.VOICE_MESSAGES.labels(direction="out", channel=channel).inc()
             return
         except Exception:
             logger.exception(
@@ -114,7 +237,9 @@ def _handle_message(
             )
 
     try:
-        send_text(message.sender, reply)
+        with metrics.track_api_call(f"{channel}_send"):
+            send_text(message.sender, reply)
+        metrics.MESSAGES_SENT.labels(channel=channel).inc()
     except Exception:
         logger.exception("failed to send reply to %s", message.sender)
 
@@ -174,7 +299,14 @@ async def meta_webhook(request: Request, background: BackgroundTasks) -> Respons
         return Response(status_code=200)
 
     for message in messages:
-        background.add_task(_handle_message, message, meta.send_message, meta.send_voice_message)
+        background.add_task(
+            _handle_message,
+            message,
+            meta.send_message,
+            meta.send_voice_message,
+            meta.send_typing_indicator,
+            channel="meta",
+        )
 
     return Response(status_code=200)
 
@@ -209,7 +341,7 @@ async def twilio_webhook(request: Request, background: BackgroundTasks) -> Respo
         logger.info("ignoring non-text webhook event")
         return Response(status_code=204)
 
-    background.add_task(_handle_message, message, twilio.send_message)
+    background.add_task(_handle_message, message, twilio.send_message, channel="twilio")
 
     # Empty TwiML: acknowledge without sending an inline reply.
     # text/xml, not application/xml — Twilio rejects the latter with 12300.
@@ -251,18 +383,28 @@ async def chat_completions(request: Request):
 
     body = await request.json()
     messages = openai_compat.parse_messages(body)
+    metrics.MESSAGES_RECEIVED.labels(channel="web", user="web").inc()
 
     if body.get("stream"):
+        # Counts a stream that was started, not necessarily one a client
+        # read to completion — the alternative (only counting on full
+        # delivery) would need the same generator-consumption tracking
+        # timed_generator already does for TURN_DURATION, for one counter.
+        metrics.MESSAGES_SENT.labels(channel="web").inc()
         return StreamingResponse(
-            openai_compat.stream_sse(stream_reply(messages)),
+            openai_compat.stream_sse(metrics.timed_generator("web", stream_reply(messages))),
             media_type="text/event-stream",
         )
 
     try:
-        content = "".join(stream_reply(messages))
+        with metrics.TURN_DURATION.labels(channel="web").time():
+            content = "".join(stream_reply(messages))
     except Exception:
         logger.exception("agent failed for a web chat request")
+        metrics.AGENT_ERRORS.labels(channel="web").inc()
         content = FAILURE_REPLY
+    else:
+        metrics.MESSAGES_SENT.labels(channel="web").inc()
 
     return openai_compat.completion_payload(content)
 
@@ -277,6 +419,7 @@ async def audio_transcriptions(request: Request, file: UploadFile = File(...)):
         return _unauthorized()
 
     audio_bytes = await file.read()
+    metrics.VOICE_MESSAGES.labels(direction="in", channel="web").inc()
 
     try:
         text = voice.transcribe(audio_bytes, filename=file.filename or "audio.webm")
@@ -310,6 +453,7 @@ async def audio_speech(request: Request):
             status_code=500, content={"error": {"message": "speech synthesis failed"}}
         )
 
+    metrics.VOICE_MESSAGES.labels(direction="out", channel="web").inc()
     return Response(content=audio_bytes, media_type="audio/ogg")
 
 

@@ -115,5 +115,8 @@ class Settings:
     def openai_compat_api_key(self) -> str:
         return _require("OPENAI_COMPAT_API_KEY")
 
+    def metrics_api_key(self) -> str:
+        return _require("METRICS_API_KEY")
+
 
 settings = Settings()

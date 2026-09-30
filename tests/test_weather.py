@@ -5,6 +5,7 @@ to hit for real, but still shouldn't be in the fast/mocked default layer).
 """
 
 import app.weather as weather
+from app import metrics
 
 
 class _FakeResponse:
@@ -169,6 +170,41 @@ def test_get_report_builds_a_full_report_end_to_end(monkeypatch):
 
     assert "Paris, France" in report
     assert "slight rain" in report
+
+
+def test_get_report_records_a_successful_api_call(monkeypatch):
+    geocode_response = _FakeResponse(
+        {"results": [{"name": "Paris", "country": "France", "latitude": 48.85, "longitude": 2.35}]}
+    )
+    forecast_response = _FakeResponse(_forecast())
+
+    monkeypatch.setattr(
+        weather.requests,
+        "get",
+        lambda url, params=None, timeout=None: (
+            geocode_response if url == weather.GEOCODE_URL else forecast_response
+        ),
+    )
+
+    before = metrics.API_CALLS.labels(api="open_meteo", status="success")._value.get()
+    weather.get_report("Paris")
+
+    assert metrics.API_CALLS.labels(api="open_meteo", status="success")._value.get() == before + 1
+
+
+def test_get_report_records_a_failed_api_call(monkeypatch):
+    def _boom(*a, **k):
+        raise RuntimeError("open-meteo down")
+
+    monkeypatch.setattr(weather.requests, "get", _boom)
+
+    before = metrics.API_CALLS.labels(api="open_meteo", status="error")._value.get()
+    try:
+        weather.get_report("Paris")
+    except RuntimeError:
+        pass
+
+    assert metrics.API_CALLS.labels(api="open_meteo", status="error")._value.get() == before + 1
 
 
 def test_normalize_unit_accepts_common_spellings():

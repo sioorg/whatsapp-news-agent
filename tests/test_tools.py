@@ -10,6 +10,7 @@ caching hiccup can never surface as a failed search.
 import logging
 
 import app.tools as tools_module
+from app import metrics
 
 
 def test_format_reports_no_results_found_on_an_empty_list():
@@ -130,6 +131,72 @@ def test_get_weather_defaults_to_celsius_and_one_day(monkeypatch):
     tools_module.get_weather.invoke({"location": "Paris"})
 
     assert calls == [("Paris", {"unit": "celsius", "days": 1})]
+
+
+# --- Metrics (app/metrics.py) — counters are global process state, so
+# these assert a delta rather than an absolute value. ------------------
+
+
+def test_rag_search_records_a_hit(monkeypatch):
+    monkeypatch.setattr(
+        tools_module.rag, "search", lambda query, **_: [_FakeHit({"text": "cached"})]
+    )
+
+    before = metrics.RAG_LOOKUPS.labels(result="hit")._value.get()
+    tools_module.rag_search.invoke({"query": "anything"})
+
+    assert metrics.RAG_LOOKUPS.labels(result="hit")._value.get() == before + 1
+
+
+def test_rag_search_records_a_miss(monkeypatch):
+    monkeypatch.setattr(tools_module.rag, "search", lambda query, **_: [])
+
+    before = metrics.RAG_LOOKUPS.labels(result="miss")._value.get()
+    tools_module.rag_search.invoke({"query": "anything"})
+
+    assert metrics.RAG_LOOKUPS.labels(result="miss")._value.get() == before + 1
+
+
+def test_news_search_records_a_tool_call_and_a_successful_api_call(monkeypatch):
+    monkeypatch.setattr(tools_module.rag, "cache_search_results", lambda *_: None)
+    monkeypatch.setattr(
+        tools_module,
+        "_client",
+        lambda: type("FakeClient", (), {"search": lambda self, **_: {"results": []}})(),
+    )
+
+    tool_before = metrics.TOOL_CALLS.labels(tool="news_search")._value.get()
+    api_before = metrics.API_CALLS.labels(api="tavily", status="success")._value.get()
+
+    tools_module.news_search.invoke({"query": "AI"})
+
+    assert metrics.TOOL_CALLS.labels(tool="news_search")._value.get() == tool_before + 1
+    assert metrics.API_CALLS.labels(api="tavily", status="success")._value.get() == api_before + 1
+
+
+def test_news_search_records_a_failed_api_call(monkeypatch):
+    def _boom(**_):
+        raise RuntimeError("tavily down")
+
+    monkeypatch.setattr(tools_module, "_client", lambda: type("FakeClient", (), {"search": lambda self, **kw: _boom(**kw)})())
+
+    before = metrics.API_CALLS.labels(api="tavily", status="error")._value.get()
+
+    try:
+        tools_module.news_search.invoke({"query": "AI"})
+    except RuntimeError:
+        pass
+
+    assert metrics.API_CALLS.labels(api="tavily", status="error")._value.get() == before + 1
+
+
+def test_get_weather_records_a_tool_call(monkeypatch):
+    monkeypatch.setattr(tools_module.weather, "get_report", lambda location, **_: "ok")
+
+    before = metrics.TOOL_CALLS.labels(tool="get_weather")._value.get()
+    tools_module.get_weather.invoke({"location": "Paris"})
+
+    assert metrics.TOOL_CALLS.labels(tool="get_weather")._value.get() == before + 1
 
 
 def test_get_weather_is_never_cached_into_rag(monkeypatch):

@@ -28,6 +28,7 @@ os.environ.setdefault("META_APP_SECRET", "test-app-secret")
 os.environ.setdefault("TWILIO_ACCOUNT_SID", "AC" + "0" * 32)
 os.environ.setdefault("TWILIO_AUTH_TOKEN", "0" * 32)
 os.environ.setdefault("OPENAI_COMPAT_API_KEY", "test-openai-compat-key")
+os.environ.setdefault("METRICS_API_KEY", "test-metrics-key")
 os.environ.setdefault("CHECKPOINT_DB", "")
 
 import pytest  # noqa: E402
