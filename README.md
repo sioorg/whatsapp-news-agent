@@ -36,7 +36,8 @@ switch to misconfigure:
 | [app/rag.py](app/rag.py) | Local knowledge store — LangGraph `SqliteStore` + local embeddings |
 | [app/weather.py](app/weather.py) | Live weather via Open-Meteo — free, keyless |
 | [app/voice.py](app/voice.py) | Speech-to-text/text-to-speech via Groq, plus the ffmpeg conversion voice replies need |
-| [app/tools.py](app/tools.py) | `rag_search` (local), Tavily's `news_search`/`web_search`, `get_weather` |
+| [app/image_gen.py](app/image_gen.py) | Image generation — Pollinations (free, default) or OpenAI `gpt-image-1` (paid, opt-in) |
+| [app/tools.py](app/tools.py) | `rag_search` (local), Tavily's `news_search`/`web_search`, `get_weather`, `generate_image` |
 | [app/agent.py](app/agent.py) | LangGraph graph — router + agent/tools loop + per-sender memory |
 | [app/connectors/common.py](app/connectors/common.py) | `InboundMessage`, chunking — shared by both WhatsApp connectors |
 | [app/connectors/meta_whatsapp.py](app/connectors/meta_whatsapp.py) | Cloud API send/receive, media upload/download, HMAC signature |
@@ -264,6 +265,51 @@ official names (leaning on its own general knowledge of common aliases —
 "Bengaluru" not "Bangalore", "Mumbai" not "Bombay"), and every report names
 the resolved place, region, and country up front, so a wrong match is at
 least visible rather than silently trusted.
+
+## Image generation
+
+[app/image_gen.py](app/image_gen.py) backs the `generate_image` tool —
+"draw/make/generate me an image of X". Provider-pluggable via
+`IMAGE_PROVIDER`, same pattern as `LLM_PROVIDER`:
+
+| | Provider | Cost | Notes |
+| --- | --- | --- | --- |
+| Default | `pollinations` | Free, keyless | [Pollinations.ai](https://pollinations.ai) — same "no signup, no cost" bar Open-Meteo was picked for. Free-tier images carry a small logo (no account configured). Returns JPEG. |
+| Opt-in | `openai` | Paid, per image | `gpt-image-1`, needs `OPENAI_API_KEY`. Better quality/prompt-following; real money per call, so never the default. Returns PNG. |
+
+The two providers return different image formats, which matters: `generate()`
+returns `(image_bytes, mime_type)`, not just bytes, so every caller (Meta's
+media upload, the web connector's inline markdown) labels the file correctly
+regardless of provider — Meta rejects an upload whose declared type doesn't
+match the actual bytes.
+
+**Offered on every route**, like `get_weather` and for the same reason: an
+image request isn't a rag-vs-fresh-knowledge question, and gating it behind
+the router risks the same failure mode (see [Weather](#weather) above).
+
+**How the image actually gets delivered — no reliance on the model
+echoing anything.** The image never goes to the LLM as text (that would
+mean base64-encoding it into the conversation for a model that can't even
+see it, burning a huge number of tokens for nothing). Instead, the tool is
+defined with `response_format="content_and_artifact"`: its text return value
+goes to the LLM as normal, but the raw bytes ride along on the resulting
+`ToolMessage.artifact`, invisible to the model. `app.agent.answer()` and
+`stream_reply()` pull it out of the graph's own message history directly
+(scoped to the current turn only — `answer()`'s checkpointed history is
+otherwise ever-growing, and a naive scan would resurface a stale image from
+an earlier turn) and stash it via a `contextvars`-based side channel
+(`pop_pending_image()`) that `app/main.py` reads right after. On WhatsApp
+this becomes a real image message (reply text as its caption, capped at
+Meta's 1024-char limit); on the web connector it's appended as inline
+Markdown (`![...](data:image/jpeg;base64,...)`), which Open WebUI and most
+Markdown-rendering clients render directly — for a streaming response, as
+one final chunk after all the text, since there's no way to know "no more
+text is coming" before the underlying generator is fully drained.
+
+**Twilio gets no image support** — same reasoning as voice: Twilio has no
+media-send path wired up in this project (trial-tier limitations), so a
+Twilio user who asks for an image just gets the model's text description
+of what it made, not the picture itself.
 
 ## Setup
 

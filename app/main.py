@@ -8,6 +8,7 @@ get wrong:
   /v1/*              OpenAI-compatible         (web frontend, e.g. Open WebUI)
 """
 
+import base64
 import json
 import logging
 import threading
@@ -20,7 +21,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from app import metrics, rag, voice
-from app.agent import answer, stream_reply
+from app.agent import answer, pop_pending_image, stream_reply
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
 from app.connectors import openai_compat
@@ -63,6 +64,16 @@ VOICE_ACK_REPLY = "🎙️ Got your voice note, preparing a voice reply…"
 # flight after this long, say so explicitly.
 VOICE_ACK_DELAY_SECONDS = 5
 VOICE_FAILURE_REPLY = "Sorry, I couldn't understand that voice message. Try again, or type instead."
+
+
+def _image_markdown(image: tuple[bytes, str]) -> str:
+    """Inline-image markdown for the web connector — Open WebUI (and most
+    Markdown-rendering OpenAI-compatible clients) render a base64 data URI
+    directly, no file hosting needed."""
+
+    image_bytes, mime_type = image
+    encoded = base64.b64encode(image_bytes).decode()
+    return f"\n\n![generated image](data:{mime_type};base64,{encoded})"
 
 
 @app.get("/health")
@@ -140,6 +151,7 @@ def _handle_message(
     send_text: Callable[[str, str], None],
     send_voice: Callable[[str, bytes], None] | None = None,
     send_typing: Callable[[str], None] | None = None,
+    send_image: Callable[[str, bytes, str, str], None] | None = None,
     channel: str = "unknown",
 ) -> None:
     """Run the agent and send the reply, with a typing indicator meanwhile.
@@ -158,7 +170,7 @@ def _handle_message(
 
     try:
         with _typing_keepalive(message, send_typing):
-            _process_message(message, send_text, send_voice, channel=channel)
+            _process_message(message, send_text, send_voice, send_image, channel=channel)
     finally:
         if ack is not None:
             ack.cancel()
@@ -175,6 +187,7 @@ def _process_message(
     message: InboundMessage,
     send_text: Callable[[str, str], None],
     send_voice: Callable[[str, bytes], None] | None = None,
+    send_image: Callable[[str, bytes, str, str], None] | None = None,
     channel: str = "unknown",
 ) -> None:
     """Run the agent and send the reply. Executed off the webhook request.
@@ -186,10 +199,12 @@ def _process_message(
     with, so this replies with a plain explanation and stops rather than
     calling the agent on empty input.
 
-    ``send_voice`` is only ever passed for Meta (Twilio has no voice-send
-    support). If the original message was voice, replying with voice is
-    attempted first; any failure there — synthesis or the send itself —
-    falls back to a text reply rather than leaving the user with nothing.
+    ``send_voice``/``send_image`` are only ever passed for Meta (Twilio has
+    neither media-send capability in this project). If app.tools.generate_image
+    ran this turn, sending the image (with the reply as its caption) takes
+    priority over a voice reply — reading "generated an image" aloud would be
+    pointless when the actual picture is what was asked for. Failing either
+    falls back to a plain text reply rather than leaving the user with nothing.
 
     ``channel`` only feeds Prometheus labels (app/metrics.py) — it changes
     no behavior here.
@@ -222,6 +237,23 @@ def _process_message(
         logger.exception("agent failed for %s", message.sender)
         metrics.AGENT_ERRORS.labels(channel=channel).inc()
         reply = FAILURE_REPLY
+
+    image = pop_pending_image()
+    if image is not None and send_image is not None:
+        image_bytes, mime_type = image
+        try:
+            # Meta caps an image caption at 1024 chars — shorter than a
+            # text body's own cap, so truncate defensively rather than
+            # risk the whole send being rejected over a long reply.
+            with metrics.track_api_call(f"{channel}_send"):
+                send_image(message.sender, image_bytes, mime_type, reply[:1024])
+            metrics.MESSAGES_SENT.labels(channel=channel).inc()
+            return
+        except Exception:
+            logger.exception(
+                "failed to send a generated image to %s, falling back to text",
+                message.sender,
+            )
 
     if message.reply_as_voice and send_voice is not None:
         try:
@@ -305,6 +337,7 @@ async def meta_webhook(request: Request, background: BackgroundTasks) -> Respons
             meta.send_message,
             meta.send_voice_message,
             meta.send_typing_indicator,
+            meta.send_image_message,
             channel="meta",
         )
 
@@ -391,8 +424,21 @@ async def chat_completions(request: Request):
         # delivery) would need the same generator-consumption tracking
         # timed_generator already does for TURN_DURATION, for one counter.
         metrics.MESSAGES_SENT.labels(channel="web").inc()
+
+        def _text_then_image() -> Iterator[str]:
+            # pop_pending_image() only has something once the underlying
+            # generator is fully drained (generate_image's artifact is
+            # captured mid-stream by app.agent.stream_reply, but there's no
+            # way to know "no more text coming" until exhaustion) — so the
+            # image, if any, always arrives as one final chunk after all
+            # the text, not interleaved with it.
+            yield from metrics.timed_generator("web", stream_reply(messages))
+            image = pop_pending_image()
+            if image is not None:
+                yield _image_markdown(image)
+
         return StreamingResponse(
-            openai_compat.stream_sse(metrics.timed_generator("web", stream_reply(messages))),
+            openai_compat.stream_sse(_text_then_image()),
             media_type="text/event-stream",
         )
 
@@ -405,6 +451,9 @@ async def chat_completions(request: Request):
         content = FAILURE_REPLY
     else:
         metrics.MESSAGES_SENT.labels(channel="web").inc()
+        image = pop_pending_image()
+        if image is not None:
+            content += _image_markdown(image)
 
     return openai_compat.completion_payload(content)
 

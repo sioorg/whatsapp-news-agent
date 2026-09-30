@@ -76,6 +76,12 @@ class Settings:
         default_factory=lambda: os.getenv("PUBLIC_BASE_URL", "")
     )
 
+    # --- Image generation ---
+    # pollinations (free, keyless, default) | openai (paid, needs OPENAI_API_KEY)
+    image_provider: str = field(
+        default_factory=lambda: os.getenv("IMAGE_PROVIDER", "pollinations").lower()
+    )
+
     # --- Meta WhatsApp Cloud API ---
     meta_graph_version: str = field(
         default_factory=lambda: os.getenv("META_GRAPH_VERSION", "v21.0")
@@ -117,6 +123,9 @@ class Settings:
 
     def metrics_api_key(self) -> str:
         return _require("METRICS_API_KEY")
+
+    def openai_api_key(self) -> str:
+        return _require("OPENAI_API_KEY")
 
 
 settings = Settings()

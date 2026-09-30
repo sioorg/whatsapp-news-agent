@@ -189,6 +189,40 @@ def test_a_failed_voice_reply_falls_back_to_text(client, meta_audio_payload):
     assert sent_text == ["the real answer"]
 
 
+# --- Meta inbound image generation ------------------------------------------
+
+
+def test_a_generated_image_is_sent_via_meta(client, meta_payload):
+    sent_image = []
+
+    with patch(
+        "app.connectors.meta_whatsapp.send_image_message",
+        lambda to, img, mime, caption: sent_image.append((to, img, mime, caption)),
+    ):
+        with patch("app.main.answer", return_value="Here's your cat"):
+            with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
+                response = client.post("/webhook/meta", json=meta_payload)
+
+    assert response.status_code == 200
+    assert sent_image == [("919902245562", b"fake-bytes", "image/jpeg", "Here's your cat")]
+
+
+def test_a_failed_image_send_falls_back_to_text(client, meta_payload):
+    sent_text = []
+
+    with patch("app.connectors.meta_whatsapp.send_image_message", side_effect=RuntimeError("meta down")):
+        with patch(
+            "app.connectors.meta_whatsapp.send_message",
+            lambda to, body: sent_text.append(body),
+        ):
+            with patch("app.main.answer", return_value="Here's your cat"):
+                with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
+                    response = client.post("/webhook/meta", json=meta_payload)
+
+    assert response.status_code == 200
+    assert sent_text == ["Here's your cat"]
+
+
 # --- Meta signature verification ------------------------------------------
 
 
@@ -321,6 +355,20 @@ def test_chat_completions_non_streaming_survives_an_agent_failure(client):
     assert "went wrong" in response.json()["choices"][0]["message"]["content"]
 
 
+def test_chat_completions_non_streaming_appends_generated_image_markdown(client):
+    with patch("app.main.stream_reply", return_value=iter(["Here's your cat"])):
+        with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
+            response = client.post(
+                "/v1/chat/completions",
+                headers=_AUTH,
+                json={"model": "OneAgent", "messages": [{"role": "user", "content": "draw a cat"}]},
+            )
+
+    content = response.json()["choices"][0]["message"]["content"]
+    assert "Here's your cat" in content
+    assert "data:image/jpeg;base64," in content
+
+
 def test_chat_completions_streaming(client):
     with patch("app.main.stream_reply", return_value=iter(["stub ", "reply"])):
         response = client.post(
@@ -338,6 +386,26 @@ def test_chat_completions_streaming(client):
     assert "stub " in response.text
     assert "reply" in response.text
     assert response.text.strip().endswith("data: [DONE]")
+
+
+def test_chat_completions_streaming_appends_generated_image_markdown(client):
+    """The image arrives as one final chunk after all the text — see
+    _text_then_image's comment in app/main.py for why it can't be
+    interleaved."""
+
+    with patch("app.main.stream_reply", return_value=iter(["Here's your cat"])):
+        with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
+            response = client.post(
+                "/v1/chat/completions",
+                headers=_AUTH,
+                json={
+                    "model": "OneAgent",
+                    "messages": [{"role": "user", "content": "draw a cat"}],
+                    "stream": True,
+                },
+            )
+
+    assert "data:image/jpeg;base64," in response.text
 
 
 def test_chat_completions_drops_the_client_system_message(client):
@@ -465,7 +533,7 @@ def test_voice_ack_sent_only_when_reply_is_slow(monkeypatch):
     from app.connectors.common import InboundMessage
 
     monkeypatch.setattr(main, "VOICE_ACK_DELAY_SECONDS", 0.05)
-    monkeypatch.setattr(main, "_process_message", lambda m, t, v, **kwargs: time.sleep(0.2))
+    monkeypatch.setattr(main, "_process_message", lambda m, t, v=None, i=None, **kwargs: time.sleep(0.2))
 
     sent = []
     msg = InboundMessage(sender="91", body="", reply_as_voice=True)
@@ -473,7 +541,7 @@ def test_voice_ack_sent_only_when_reply_is_slow(monkeypatch):
     assert sent == [main.VOICE_ACK_REPLY]
 
     sent.clear()
-    monkeypatch.setattr(main, "_process_message", lambda m, t, v, **kwargs: None)
+    monkeypatch.setattr(main, "_process_message", lambda m, t, v=None, i=None, **kwargs: None)
     main._handle_message(msg, lambda to, body: sent.append(body))
     time.sleep(0.1)
     assert sent == []

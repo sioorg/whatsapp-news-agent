@@ -180,10 +180,15 @@ def _route_and_get_bound_tools(monkeypatch, route_choice):
 
 
 def test_rag_route_offers_rag_search_and_weather(monkeypatch):
-    """get_weather rides along on every route — see ROUTE_TOOLS's comment
-    in app/agent.py for why it isn't gated like the search tools are."""
+    """get_weather/generate_image ride along on every route — see
+    ROUTE_TOOLS's comment in app/agent.py for why they aren't gated like
+    the search tools are."""
 
-    assert _route_and_get_bound_tools(monkeypatch, "rag") == ["rag_search", "get_weather"]
+    assert _route_and_get_bound_tools(monkeypatch, "rag") == [
+        "rag_search",
+        "get_weather",
+        "generate_image",
+    ]
 
 
 def test_web_route_offers_the_web_tools_and_weather(monkeypatch):
@@ -191,6 +196,7 @@ def test_web_route_offers_the_web_tools_and_weather(monkeypatch):
         "news_search",
         "web_search",
         "get_weather",
+        "generate_image",
     ]
 
 
@@ -200,6 +206,7 @@ def test_both_route_offers_every_tool(monkeypatch):
         "news_search",
         "web_search",
         "get_weather",
+        "generate_image",
     ]
 
 
@@ -242,6 +249,7 @@ def test_a_broken_router_fails_open_to_every_tool(monkeypatch):
             "news_search",
             "web_search",
             "get_weather",
+            "generate_image",
         ]
     finally:
         agent_module.build_graph.cache_clear()
@@ -345,3 +353,62 @@ def test_stream_reply_never_touches_the_checkpoint_db(monkeypatch, tmp_path):
     after = sqlite3.connect(db_path).execute("select count(*) from checkpoints").fetchone()[0]
     assert before == after == 0
     agent_module.build_stateless_graph.cache_clear()
+
+
+class _ImageStubLLM:
+    """Calls generate_image on the very first invoke, then always replies
+    with plain text — for testing pop_pending_image()'s extraction and its
+    stale-history guard across separate turns on the same thread."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def with_structured_output(self, schema):
+        class _Router:
+            def invoke(self, messages):
+                return schema(choice="both")
+
+        return _Router()
+
+    def bind_tools(self, tools):
+        outer = self
+
+        class _Bound:
+            def invoke(self, messages):
+                outer.calls += 1
+                if outer.calls == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {"name": "generate_image", "args": {"prompt": "a cat"}, "id": "call_1"}
+                        ],
+                    )
+                return AIMessage(content="Here you go.")
+
+        return _Bound()
+
+
+def test_answer_extracts_a_generated_image(monkeypatch):
+    """End-to-end through the real graph (ToolNode included, not stubbed)
+    — checks both that pop_pending_image() surfaces what generate_image
+    produced, and that a later turn on the same (checkpointed) thread that
+    never calls the tool again does NOT resurface it. That second check is
+    the whole reason answer() scopes its scan to messages after the latest
+    HumanMessage rather than the full, ever-growing checkpointed history —
+    see the comment there."""
+
+    monkeypatch.setattr(settings, "checkpoint_db", "")
+    monkeypatch.setattr("app.image_gen.generate", lambda prompt: (b"fake-bytes", "image/jpeg"))
+    stub = _ImageStubLLM()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_graph.cache_clear()
+
+    try:
+        reply = agent_module.answer("draw me a cat", thread_id="image-test")
+        assert reply
+        assert agent_module.pop_pending_image() == (b"fake-bytes", "image/jpeg")
+
+        agent_module.answer("anything else?", thread_id="image-test")
+        assert agent_module.pop_pending_image() is None
+    finally:
+        agent_module.build_graph.cache_clear()

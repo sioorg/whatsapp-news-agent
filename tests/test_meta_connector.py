@@ -249,6 +249,103 @@ def test_send_voice_message_raises_on_send_failure(monkeypatch):
         assert "500" in str(e)
 
 
+def test_upload_media_accepts_a_custom_filename_and_content_type(monkeypatch):
+    seen = {}
+
+    def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        seen["files"] = files
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {"id": "IMG123"}
+
+        return _Response()
+
+    monkeypatch.setattr(meta.requests, "post", fake_post)
+
+    meta.upload_media(b"fake-jpeg-bytes", filename="image.jpg", content_type="image/jpeg")
+
+    assert seen["files"]["file"] == ("image.jpg", b"fake-jpeg-bytes", "image/jpeg")
+
+
+def test_send_image_message_uploads_then_sends_with_caption(monkeypatch):
+    uploaded = {}
+
+    def fake_upload(data, *, filename, content_type):
+        uploaded["filename"] = filename
+        uploaded["content_type"] = content_type
+        return "UPLOADED_IMG"
+
+    monkeypatch.setattr(meta, "upload_media", fake_upload)
+
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {"messages": [{"id": "wamid.X"}]}
+
+        return _Response()
+
+    monkeypatch.setattr(meta.requests, "post", fake_post)
+
+    meta.send_image_message("919902245562", b"fake-jpeg", "image/jpeg", "a cat")
+
+    assert sent["type"] == "image"
+    assert sent["image"] == {"id": "UPLOADED_IMG", "caption": "a cat"}
+    assert sent["to"] == "919902245562"
+    assert uploaded["filename"] == "image.jpeg"
+    assert uploaded["content_type"] == "image/jpeg"
+
+
+def test_send_image_message_omits_caption_when_empty(monkeypatch):
+    monkeypatch.setattr(meta, "upload_media", lambda data, *, filename, content_type: "UPLOADED_IMG")
+
+    sent = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        sent.update(json)
+
+        class _Response:
+            status_code = 200
+
+            def json(self):
+                return {"messages": [{"id": "wamid.X"}]}
+
+        return _Response()
+
+    monkeypatch.setattr(meta.requests, "post", fake_post)
+
+    meta.send_image_message("919902245562", b"fake-jpeg", "image/jpeg")
+
+    assert sent["image"] == {"id": "UPLOADED_IMG"}
+
+
+def test_send_image_message_raises_on_send_failure(monkeypatch):
+    monkeypatch.setattr(meta, "upload_media", lambda data, *, filename, content_type: "UPLOADED_IMG")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        class _Response:
+            status_code = 500
+            text = "server error"
+
+        return _Response()
+
+    monkeypatch.setattr(meta.requests, "post", fake_post)
+
+    try:
+        meta.send_image_message("919902245562", b"fake-jpeg", "image/jpeg")
+        assert False, "expected a RuntimeError"
+    except RuntimeError as e:
+        assert "500" in str(e)
+
+
 def _sign(body: bytes) -> str:
     return "sha256=" + hmac.new(APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
 

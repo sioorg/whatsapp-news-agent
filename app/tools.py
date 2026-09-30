@@ -1,7 +1,8 @@
 """Tools exposed to the LangGraph agent: local knowledge, Tavily for the
-web, and live weather. See app.agent for how a question is routed to rag,
-web, or both (get_weather is offered on every route — see there for why),
-app.rag for the local store, and app.weather for the weather backend."""
+web, live weather, and image generation. See app.agent for how a question
+is routed to rag, web, or both (get_weather/generate_image are offered on
+every route — see there for why), app.rag for the local store, and
+app.weather/app.image_gen for those backends."""
 
 import logging
 from functools import lru_cache
@@ -9,7 +10,7 @@ from functools import lru_cache
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
-from app import metrics, rag, weather
+from app import image_gen, metrics, rag, weather
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -159,4 +160,28 @@ def get_weather(location: str, unit: str = "celsius", days: int = 1) -> str:
     return weather.get_report(location, unit=unit, days=days)
 
 
-TOOLS = [rag_search, news_search, web_search, get_weather]
+@tool(response_format="content_and_artifact")
+def generate_image(prompt: str) -> tuple[str, tuple[bytes, str]]:
+    """Generate an image from a text description and send it to the user.
+
+    Use this whenever the user explicitly asks for an image, picture,
+    photo, drawing, or illustration of something — not for describing an
+    existing image (this tool only creates new ones from text).
+
+    prompt: a clear, self-contained description of what to draw — expand a
+    short/vague user request into something concrete rather than passing
+    their exact words verbatim (e.g. "a golden retriever puppy playing in
+    autumn leaves, photorealistic" rather than just "a dog").
+    """
+
+    metrics.TOOL_CALLS.labels(tool="generate_image").inc()
+    image_bytes, mime_type = image_gen.generate(prompt)
+    # The image itself never goes to the LLM as text (that would mean
+    # base64-encoding it into the conversation, wasting a huge number of
+    # tokens for something the model can't even see) — it rides along as
+    # this ToolMessage's `artifact`, which app.agent.answer()/stream_reply()
+    # pull out directly to actually send, bypassing the model entirely.
+    return f"Generated an image for: {prompt}", (image_bytes, mime_type)
+
+
+TOOLS = [rag_search, news_search, web_search, get_weather, generate_image]

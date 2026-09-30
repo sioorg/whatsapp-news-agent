@@ -190,6 +190,36 @@ def test_news_search_records_a_failed_api_call(monkeypatch):
     assert metrics.API_CALLS.labels(api="tavily", status="error")._value.get() == before + 1
 
 
+def test_generate_image_returns_content_and_artifact(monkeypatch):
+    """response_format="content_and_artifact" means .invoke() with a raw
+    dict returns just the string content — the artifact (what actually
+    matters here) only shows up on the ToolMessage a full tool-call-shaped
+    invoke produces, which is what app.agent relies on. See
+    test_agent.py for that end-to-end path."""
+
+    monkeypatch.setattr(
+        tools_module.image_gen, "generate", lambda prompt: (b"fake-image-bytes", "image/jpeg")
+    )
+
+    result = tools_module.generate_image.invoke(
+        {"name": "generate_image", "args": {"prompt": "a cat"}, "id": "call_1", "type": "tool_call"}
+    )
+
+    assert result.content == "Generated an image for: a cat"
+    assert result.artifact == (b"fake-image-bytes", "image/jpeg")
+
+
+def test_generate_image_records_a_tool_call(monkeypatch):
+    monkeypatch.setattr(tools_module.image_gen, "generate", lambda prompt: (b"x", "image/jpeg"))
+
+    before = metrics.TOOL_CALLS.labels(tool="generate_image")._value.get()
+    tools_module.generate_image.invoke(
+        {"name": "generate_image", "args": {"prompt": "a cat"}, "id": "call_1", "type": "tool_call"}
+    )
+
+    assert metrics.TOOL_CALLS.labels(tool="generate_image")._value.get() == before + 1
+
+
 def test_get_weather_records_a_tool_call(monkeypatch):
     monkeypatch.setattr(tools_module.weather, "get_report", lambda location, **_: "ok")
 

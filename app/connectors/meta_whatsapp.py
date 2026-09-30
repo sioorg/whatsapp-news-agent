@@ -127,16 +127,21 @@ def download_media(media_id: str) -> bytes:
     return media.content
 
 
-def upload_media(audio_bytes: bytes) -> str:
-    """Upload audio and return its media id, ready to reference in an
-    outbound message."""
+def upload_media(
+    data: bytes, *, filename: str = "voice.ogg", content_type: str = "audio/ogg; codecs=opus"
+) -> str:
+    """Upload media and return its media id, ready to reference in an
+    outbound message. Defaults match the original voice-note caller
+    (send_voice_message); pass filename/content_type explicitly for
+    anything else (e.g. send_image_message) — Meta validates the declared
+    type against the actual bytes, so a wrong one gets rejected outright."""
 
     headers = {"Authorization": f"Bearer {settings.meta_access_token()}"}
-    files = {"file": ("voice.ogg", audio_bytes, "audio/ogg; codecs=opus")}
-    data = {"messaging_product": "whatsapp"}
+    files = {"file": (filename, data, content_type)}
+    payload = {"messaging_product": "whatsapp"}
 
     response = requests.post(
-        _media_upload_endpoint(), headers=headers, files=files, data=data, timeout=TIMEOUT_SECONDS
+        _media_upload_endpoint(), headers=headers, files=files, data=payload, timeout=TIMEOUT_SECONDS
     )
 
     if response.status_code >= 400:
@@ -241,6 +246,49 @@ def send_voice_message(to: str, audio_bytes: bytes) -> None:
 
     message_id = (response.json().get("messages") or [{}])[0].get("id", "?")
     logger.info("sent voice message %s to %s", message_id, to)
+
+
+def send_image_message(to: str, image_bytes: bytes, mime_type: str, caption: str = "") -> None:
+    """Send an image: upload it, then send a message referencing it.
+
+    ``mime_type`` must be the image's real format (see app.image_gen.generate
+    for why this project never assumes one) — Meta rejects a mismatched
+    upload rather than silently accepting it. ``caption`` is optional and,
+    unlike send_message's body, is never chunked: Meta caps it at 1024
+    characters and this project's replies are already kept well under that
+    (WhatsApp's WHATSAPP_SYSTEM_PROMPT caps replies at 1200 chars total,
+    text-only; in practice a caption accompanying an image is shorter).
+    """
+
+    extension = mime_type.split("/")[-1]
+    media_id = upload_media(image_bytes, filename=f"image.{extension}", content_type=mime_type)
+
+    headers = {
+        "Authorization": f"Bearer {settings.meta_access_token()}",
+        "Content-Type": "application/json",
+    }
+    image_payload: dict = {"id": media_id}
+    if caption:
+        image_payload["caption"] = caption
+
+    response = requests.post(
+        _endpoint(),
+        headers=headers,
+        json={
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "image",
+            "image": image_payload,
+        },
+        timeout=TIMEOUT_SECONDS,
+    )
+
+    if response.status_code >= 400:
+        raise RuntimeError(f"Meta image send failed ({response.status_code}): {response.text[:500]}")
+
+    message_id = (response.json().get("messages") or [{}])[0].get("id", "?")
+    logger.info("sent image message %s to %s", message_id, to)
 
 
 def is_valid_signature(signature: str, raw_body: bytes) -> bool:
