@@ -43,6 +43,7 @@ switch to misconfigure:
 | [app/connectors/twilio_whatsapp.py](app/connectors/twilio_whatsapp.py) | Twilio send, form parsing, signature |
 | [app/connectors/openai_compat.py](app/connectors/openai_compat.py) | OpenAI-style message conversion, `/v1/models`, SSE streaming |
 | [app/main.py](app/main.py) | FastAPI webhooks, `/v1/*`, `/chat` test endpoint, RAG model warm-up |
+| [app/metrics.py](app/metrics.py) | Prometheus business metrics — `GET /metrics`, see the Metrics section below |
 | [scripts/ingest_docs.py](scripts/ingest_docs.py) | CLI to add your own `.txt`/`.md`/`.pdf` files to the knowledge base |
 | [scripts/reset_thread.py](scripts/reset_thread.py) | CLI to clear one WhatsApp number's stuck conversation history |
 
@@ -600,6 +601,25 @@ gracefully if ffmpeg isn't installed). One `integration`-marked test
 synthesizes real speech then transcribes that same audio back, checking
 recognizable words survived the round trip — no OS-specific tooling or
 committed audio fixture needed for that.
+
+## Metrics
+
+`GET /metrics` ([app/metrics.py](app/metrics.py)) exposes Prometheus-format
+business metrics: message/conversation volume (by channel and a hashed,
+non-reversible sender id — never a raw phone number), router/tool usage,
+per-turn latency, third-party API call outcomes (LLM, Tavily, Meta,
+Open-Meteo, Groq STT/TTS), voice usage, and RAG cache hit rate.
+
+**Same access-control model as `/v1/*`, not a formality.** This route lives
+on the same public Cloudflare hostname as everything else — `METRICS_API_KEY`
+(a separate secret from `OPENAI_COMPAT_API_KEY`, so rotating one never
+affects the other) is the real gate, checked as a Bearer token, failing
+closed if unset.
+
+Meant to be scraped by the `sioorg/monitoring` stack: the container needs to
+join that stack's `monitoring` Docker network (already wired in
+`docker-compose.yml`), and Prometheus needs the same `METRICS_API_KEY` value
+in its own scrape config — see that repo's README.
 
 ## Behaviour notes
 

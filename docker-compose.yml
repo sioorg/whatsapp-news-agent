@@ -25,6 +25,10 @@ services:
 
     networks:
       - edge
+      # Lets Prometheus (in the sioorg/monitoring stack) reach GET /metrics
+      # by container name — external network, created by that stack, not
+      # this one. See its README for the matching scrape config.
+      - monitoring
 
     # Survives container replacement; holds the conversation store.
     volumes:
@@ -59,3 +63,6 @@ networks:
   edge:
     external: true
     name: edge
+  monitoring:
+    external: true
+    name: monitoring
