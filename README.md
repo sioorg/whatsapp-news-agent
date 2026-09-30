@@ -297,11 +297,18 @@ goes to the LLM as normal, but the raw bytes ride along on the resulting
 `stream_reply()` pull it out of the graph's own message history directly
 (scoped to the current turn only — `answer()`'s checkpointed history is
 otherwise ever-growing, and a naive scan would resurface a stale image from
-an earlier turn) and stash it via a `contextvars`-based side channel
-(`pop_pending_image()`) that `app/main.py` reads right after. On WhatsApp
-this becomes a real image message (reply text as its caption, capped at
-Meta's 1024-char limit); on the web connector it's appended as inline
-Markdown (`![...](data:image/jpeg;base64,...)`), which Open WebUI and most
+an earlier turn) and write it to an explicit `image_out: dict` parameter the
+caller passes in, which `app/main.py` reads right after. **Not** a
+`contextvars` side channel — that was tried first and reverted after a real
+production failure (2026-09-30): Starlette's `StreamingResponse` iterates a
+sync generator chunk-by-chunk across a thread pool, and a
+`contextvars.ContextVar.set()` made while producing one chunk doesn't
+reliably survive to a later chunk's resumption, since each resumption can
+run in a freshly copied context. A plain dict has no such problem — mutating
+and reading it doesn't depend on which thread does it. On WhatsApp this
+becomes a real image message (reply text as its caption, capped at Meta's
+1024-char limit); on the web connector it's appended as inline Markdown
+(`![...](data:image/jpeg;base64,...)`), which Open WebUI and most
 Markdown-rendering clients render directly — for a streaming response, as
 one final chunk after all the text, since there's no way to know "no more
 text is coming" before the underlying generator is fully drained.

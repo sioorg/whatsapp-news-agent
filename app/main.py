@@ -21,7 +21,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 
 from app import metrics, rag, voice
-from app.agent import answer, pop_pending_image, stream_reply
+from app.agent import answer, stream_reply
 from app.config import settings
 from app.connectors import meta_whatsapp as meta
 from app.connectors import openai_compat
@@ -230,15 +230,16 @@ def _process_message(
 
     logger.info("handling message from %s: %s", message.sender, message.body[:80])
 
+    image_holder: dict = {}
     try:
         with metrics.TURN_DURATION.labels(channel=channel).time():
-            reply = answer(message.body, thread_id=message.sender)
+            reply = answer(message.body, thread_id=message.sender, image_out=image_holder)
     except Exception:
         logger.exception("agent failed for %s", message.sender)
         metrics.AGENT_ERRORS.labels(channel=channel).inc()
         reply = FAILURE_REPLY
 
-    image = pop_pending_image()
+    image = image_holder.get("image")
     if image is not None and send_image is not None:
         image_bytes, mime_type = image
         try:
@@ -426,14 +427,26 @@ async def chat_completions(request: Request):
         metrics.MESSAGES_SENT.labels(channel="web").inc()
 
         def _text_then_image() -> Iterator[str]:
-            # pop_pending_image() only has something once the underlying
-            # generator is fully drained (generate_image's artifact is
-            # captured mid-stream by app.agent.stream_reply, but there's no
-            # way to know "no more text coming" until exhaustion) — so the
-            # image, if any, always arrives as one final chunk after all
-            # the text, not interleaved with it.
-            yield from metrics.timed_generator("web", stream_reply(messages))
-            image = pop_pending_image()
+            # image_holder only has something once the underlying generator
+            # is fully drained (generate_image's artifact is captured
+            # mid-stream by app.agent.stream_reply, but there's no way to
+            # know "no more text coming" until exhaustion) — so the image,
+            # if any, always arrives as one final chunk after all the text,
+            # not interleaved with it. A plain dict, not a contextvars side
+            # channel: Starlette's StreamingResponse iterates a sync
+            # generator across a thread pool, and a contextvars.ContextVar
+            # set while producing one chunk does not reliably survive to a
+            # later chunk's resumption — confirmed broken this way in
+            # production 2026-09-30 (image silently missing from real
+            # streamed replies despite generation succeeding). A dict's
+            # mutation/read doesn't depend on which thread does it, so it
+            # has no such problem. See answer()'s docstring in app/agent.py
+            # for the fuller writeup.
+            image_holder: dict = {}
+            yield from metrics.timed_generator(
+                "web", stream_reply(messages, image_out=image_holder)
+            )
+            image = image_holder.get("image")
             if image is not None:
                 yield _image_markdown(image)
 
@@ -442,16 +455,17 @@ async def chat_completions(request: Request):
             media_type="text/event-stream",
         )
 
+    image_holder: dict = {}
     try:
         with metrics.TURN_DURATION.labels(channel="web").time():
-            content = "".join(stream_reply(messages))
+            content = "".join(stream_reply(messages, image_out=image_holder))
     except Exception:
         logger.exception("agent failed for a web chat request")
         metrics.AGENT_ERRORS.labels(channel="web").inc()
         content = FAILURE_REPLY
     else:
         metrics.MESSAGES_SENT.labels(channel="web").inc()
-        image = pop_pending_image()
+        image = image_holder.get("image")
         if image is not None:
             content += _image_markdown(image)
 

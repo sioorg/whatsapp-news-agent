@@ -126,7 +126,7 @@ digraph WhatsAppNewsAgent {
         weather_tool [label="get_weather\noffered on: every route\nparams: unit, days (1-7)", fillcolor="#e2eec6"];
         image_tool [label="generate_image\noffered on: every route", fillcolor="#e2eec6"];
 
-        image_note [label="Image bytes ride on ToolMessage.artifact,\nnever as text to the LLM. app.agent.answer()/\nstream_reply() extract it (scoped to the current\nturn only) into a contextvars side channel —\npop_pending_image() — that meta_conn/openai_conn\nread right after, bypassing call_model entirely.", shape=note, fillcolor="#fff2cc", fontsize=10];
+        image_note [label="Image bytes ride on ToolMessage.artifact,\nnever as text to the LLM. app.agent.answer()/\nstream_reply() extract it (scoped to the current\nturn only) into an explicit image_out dict param\n(not contextvars — doesn't survive Starlette's\nthreaded StreamingResponse) that meta_conn/\nopenai_conn read right after, bypassing call_model.", shape=note, fillcolor="#fff2cc", fontsize=10];
         image_tool -> image_note [style=dotted, dir=none, constraint=false];
     }
 

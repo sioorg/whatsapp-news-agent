@@ -192,6 +192,19 @@ def test_a_failed_voice_reply_falls_back_to_text(client, meta_audio_payload):
 # --- Meta inbound image generation ------------------------------------------
 
 
+def _fake_answer_with_image(text, thread_id, image_out=None):
+    """Stands in for app.main.answer: matches its real (text, thread_id,
+    image_out=...) signature, so the fake actually exercises the same
+    "populate the caller's dict" contract the real function does — a
+    plain return_value= mock can't do that, and that gap is exactly what
+    let the underlying streaming bug (see app/agent.py's docstrings) ship
+    unnoticed in the first place."""
+
+    if image_out is not None:
+        image_out["image"] = (b"fake-bytes", "image/jpeg")
+    return "Here's your cat"
+
+
 def test_a_generated_image_is_sent_via_meta(client, meta_payload):
     sent_image = []
 
@@ -199,9 +212,8 @@ def test_a_generated_image_is_sent_via_meta(client, meta_payload):
         "app.connectors.meta_whatsapp.send_image_message",
         lambda to, img, mime, caption: sent_image.append((to, img, mime, caption)),
     ):
-        with patch("app.main.answer", return_value="Here's your cat"):
-            with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
-                response = client.post("/webhook/meta", json=meta_payload)
+        with patch("app.main.answer", side_effect=_fake_answer_with_image):
+            response = client.post("/webhook/meta", json=meta_payload)
 
     assert response.status_code == 200
     assert sent_image == [("919902245562", b"fake-bytes", "image/jpeg", "Here's your cat")]
@@ -215,9 +227,8 @@ def test_a_failed_image_send_falls_back_to_text(client, meta_payload):
             "app.connectors.meta_whatsapp.send_message",
             lambda to, body: sent_text.append(body),
         ):
-            with patch("app.main.answer", return_value="Here's your cat"):
-                with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
-                    response = client.post("/webhook/meta", json=meta_payload)
+            with patch("app.main.answer", side_effect=_fake_answer_with_image):
+                response = client.post("/webhook/meta", json=meta_payload)
 
     assert response.status_code == 200
     assert sent_text == ["Here's your cat"]
@@ -355,14 +366,25 @@ def test_chat_completions_non_streaming_survives_an_agent_failure(client):
     assert "went wrong" in response.json()["choices"][0]["message"]["content"]
 
 
+def _fake_stream_reply_with_image(messages, *, system_prompt=None, image_out=None):
+    """Stands in for app.agent.stream_reply: matches its real (messages,
+    *, system_prompt=..., image_out=...) signature and actually populates
+    image_out, the way the real generator does — a plain return_value=
+    mock can't do that. See _fake_answer_with_image's docstring for why
+    this matters."""
+
+    if image_out is not None:
+        image_out["image"] = (b"fake-bytes", "image/jpeg")
+    yield "Here's your cat"
+
+
 def test_chat_completions_non_streaming_appends_generated_image_markdown(client):
-    with patch("app.main.stream_reply", return_value=iter(["Here's your cat"])):
-        with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
-            response = client.post(
-                "/v1/chat/completions",
-                headers=_AUTH,
-                json={"model": "OneAgent", "messages": [{"role": "user", "content": "draw a cat"}]},
-            )
+    with patch("app.main.stream_reply", side_effect=_fake_stream_reply_with_image):
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_AUTH,
+            json={"model": "OneAgent", "messages": [{"role": "user", "content": "draw a cat"}]},
+        )
 
     content = response.json()["choices"][0]["message"]["content"]
     assert "Here's your cat" in content
@@ -393,18 +415,83 @@ def test_chat_completions_streaming_appends_generated_image_markdown(client):
     _text_then_image's comment in app/main.py for why it can't be
     interleaved."""
 
-    with patch("app.main.stream_reply", return_value=iter(["Here's your cat"])):
-        with patch("app.main.pop_pending_image", return_value=(b"fake-bytes", "image/jpeg")):
-            response = client.post(
-                "/v1/chat/completions",
-                headers=_AUTH,
-                json={
-                    "model": "OneAgent",
-                    "messages": [{"role": "user", "content": "draw a cat"}],
-                    "stream": True,
-                },
-            )
+    with patch("app.main.stream_reply", side_effect=_fake_stream_reply_with_image):
+        response = client.post(
+            "/v1/chat/completions",
+            headers=_AUTH,
+            json={
+                "model": "OneAgent",
+                "messages": [{"role": "user", "content": "draw a cat"}],
+                "stream": True,
+            },
+        )
 
+    assert "data:image/jpeg;base64," in response.text
+
+
+def test_chat_completions_streaming_delivers_a_real_image_end_to_end(client):
+    """Deliberately mocks nothing above the LLM boundary — real
+    app.agent.stream_reply, real LangGraph .stream(), real
+    StreamingResponse over the real ASGI transport this TestClient uses.
+    This is the test that would have caught the actual production bug
+    (2026-09-30): image generation succeeded, but a contextvars-based side
+    channel didn't survive Starlette's StreamingResponse iterating a sync
+    generator across a thread pool, so the image silently never reached
+    the response. Every other streaming-image test in this file mocks
+    app.main.stream_reply directly, which can't exercise that failure
+    mode at all — hence this one, going through the full real path."""
+
+    from unittest.mock import patch as _patch
+
+    from langchain_core.messages import AIMessage
+
+    import app.agent as agent_module
+
+    class _Stub:
+        def __init__(self):
+            self.calls = 0
+
+        def with_structured_output(self, schema):
+            class _Router:
+                def invoke(self, messages):
+                    return schema(choice="both")
+
+            return _Router()
+
+        def bind_tools(self, tools):
+            outer = self
+
+            class _Bound:
+                def invoke(self, messages):
+                    outer.calls += 1
+                    if outer.calls == 1:
+                        return AIMessage(
+                            content="",
+                            tool_calls=[
+                                {"name": "generate_image", "args": {"prompt": "a cat"}, "id": "call_1"}
+                            ],
+                        )
+                    return AIMessage(content="Here you go.")
+
+            return _Bound()
+
+    with _patch("app.image_gen.generate", lambda prompt: (b"fake-bytes", "image/jpeg")):
+        with _patch.object(agent_module, "build_llm", lambda: _Stub()):
+            agent_module.build_stateless_graph.cache_clear()
+            try:
+                response = client.post(
+                    "/v1/chat/completions",
+                    headers=_AUTH,
+                    json={
+                        "model": "OneAgent",
+                        "messages": [{"role": "user", "content": "draw a cat"}],
+                        "stream": True,
+                    },
+                )
+            finally:
+                agent_module.build_stateless_graph.cache_clear()
+
+    assert response.status_code == 200
     assert "data:image/jpeg;base64," in response.text
 
 

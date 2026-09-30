@@ -16,7 +16,6 @@ thread_id, which would accumulate one dead row per web message forever in
 CHECKPOINT_DB's file if it went through the checkpointed graph instead).
 """
 
-import contextvars
 from datetime import date
 from functools import lru_cache
 from typing import Annotated, Iterator, Literal
@@ -45,28 +44,9 @@ from app.tools import (
     web_search,
 )
 
-# Set by answer()/stream_reply() when app.tools.generate_image ran this
-# turn, read (and cleared) by pop_pending_image() right after — see there
-# for why this side channel exists instead of putting bytes in the reply
-# text. contextvars, not a plain module dict: each request/background task
-# gets its own isolated value, so concurrent turns from different users can
-# never see each other's pending image. Value is (image_bytes, mime_type)
-# — see app.image_gen.generate for why the mime type has to travel with
-# the bytes rather than being assumed.
-_pending_image: contextvars.ContextVar[tuple[bytes, str] | None] = contextvars.ContextVar(
-    "_pending_image", default=None
-)
-
-
-def pop_pending_image() -> tuple[bytes, str] | None:
-    """The (image_bytes, mime_type) generate_image produced during the
-    most recent answer()/stream_reply() call in this context (None if it
-    didn't run, or wasn't called this turn), and clears it. Call once,
-    immediately after — see app/main.py's callers."""
-
-    image = _pending_image.get()
-    _pending_image.set(None)
-    return image
+# app.tools.generate_image's (image_bytes, mime_type) — see app.image_gen.generate
+# for why the mime type has to travel with the bytes rather than being assumed.
+ImageArtifact = tuple[bytes, str]
 
 
 # WhatsApp/Twilio: plaintext, WhatsApp's own *bold*/_italic_ convention (not
@@ -288,14 +268,29 @@ def build_stateless_graph():
     return _build_graph_builder().compile()
 
 
-def answer(text: str, thread_id: str) -> str:
+def answer(
+    text: str, thread_id: str, *, image_out: dict[str, ImageArtifact] | None = None
+) -> str:
     """Run one user turn through the graph and return the reply text.
 
     ``thread_id`` scopes conversation memory. Pass the sender's WhatsApp
     number so each user gets their own history.
-    """
 
-    _pending_image.set(None)
+    ``image_out``: if app.tools.generate_image ran this turn, its artifact
+    is written to ``image_out["image"]`` — an explicit output parameter
+    (a plain dict the caller owns and reads right after) rather than
+    returning it directly, since ``answer()``'s str return type is relied
+    on by every existing caller/test. A contextvars-based side channel was
+    tried first and reverted: it worked for this function (one synchronous
+    call per background task, no thread-hopping) but NOT for
+    stream_reply()'s callers, which stream through Starlette's
+    StreamingResponse — that iterates a sync generator chunk-by-chunk via
+    a thread pool, and a contextvars.ContextVar.set() made while producing
+    one chunk does not reliably survive to when a later chunk is produced,
+    since each resumption can run in a freshly copied context. A plain
+    dict has no such problem: mutating and reading it doesn't depend on
+    which context/thread does the mutating.
+    """
 
     result = build_graph().invoke(
         {"messages": [HumanMessage(content=text)]},
@@ -312,14 +307,15 @@ def answer(text: str, thread_id: str) -> str:
     # ToolMessage would resurface an OLD image on a later turn that never
     # asked for one. Scoping to messages after the latest HumanMessage
     # (always this turn's, since it was just appended) avoids that.
-    last_human_idx = max(
-        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
-        default=-1,
-    )
-    for m in reversed(messages[last_human_idx + 1 :]):
-        if isinstance(m, ToolMessage) and m.name == "generate_image" and getattr(m, "artifact", None):
-            _pending_image.set(m.artifact)
-            break
+    if image_out is not None:
+        last_human_idx = max(
+            (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)),
+            default=-1,
+        )
+        for m in reversed(messages[last_human_idx + 1 :]):
+            if isinstance(m, ToolMessage) and m.name == "generate_image" and getattr(m, "artifact", None):
+                image_out["image"] = m.artifact
+                break
 
     reply = messages[-1].content
 
@@ -333,7 +329,10 @@ def answer(text: str, thread_id: str) -> str:
 
 
 def stream_reply(
-    messages: list[AnyMessage], *, system_prompt: str = WEB_SYSTEM_PROMPT
+    messages: list[AnyMessage],
+    *,
+    system_prompt: str = WEB_SYSTEM_PROMPT,
+    image_out: dict[str, ImageArtifact] | None = None,
 ) -> Iterator[str]:
     """Stream the final answer's text as it's generated, for a full,
     caller-supplied conversation. Used by the OpenAI-compatible web
@@ -348,14 +347,17 @@ def stream_reply(
     Filtering on "node is agent AND has content" is what's left after
     excluding both.
 
-    Also watches every chunk (not just "agent" ones) for a generate_image
-    ToolMessage, stashing its artifact for pop_pending_image() — no stale-
-    history risk here the way answer() has to guard against, since
-    build_stateless_graph has no checkpointer: every call starts fresh from
-    exactly the caller-supplied ``messages``, nothing accumulated.
+    ``image_out``: see answer()'s docstring for the full reasoning — same
+    explicit-output-parameter pattern, required here (not just preferred)
+    since a contextvars-based side channel was tried first and confirmed
+    broken specifically for this function's callers (Starlette's
+    StreamingResponse iterates a sync generator across a thread pool,
+    which contextvars.ContextVar.set() does not reliably survive between
+    chunks). No stale-history risk scoping this to "every chunk of this
+    call" the way answer() has to guard against, since build_stateless_graph
+    has no checkpointer: every call starts fresh from exactly the
+    caller-supplied ``messages``, nothing accumulated.
     """
-
-    _pending_image.set(None)
 
     for chunk, metadata in build_stateless_graph().stream(
         {"messages": messages, "system_prompt": system_prompt},
@@ -363,11 +365,12 @@ def stream_reply(
         stream_mode="messages",
     ):
         if (
-            isinstance(chunk, ToolMessage)
+            image_out is not None
+            and isinstance(chunk, ToolMessage)
             and chunk.name == "generate_image"
             and getattr(chunk, "artifact", None)
         ):
-            _pending_image.set(chunk.artifact)
+            image_out["image"] = chunk.artifact
 
         if metadata.get("langgraph_node") == "agent" and chunk.content:
             content = chunk.content

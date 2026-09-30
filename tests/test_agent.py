@@ -357,8 +357,9 @@ def test_stream_reply_never_touches_the_checkpoint_db(monkeypatch, tmp_path):
 
 class _ImageStubLLM:
     """Calls generate_image on the very first invoke, then always replies
-    with plain text — for testing pop_pending_image()'s extraction and its
-    stale-history guard across separate turns on the same thread."""
+    with plain text — for testing answer()/stream_reply()'s image_out
+    extraction, including answer()'s stale-history guard across separate
+    turns on the same thread."""
 
     def __init__(self):
         self.calls = 0
@@ -390,7 +391,7 @@ class _ImageStubLLM:
 
 def test_answer_extracts_a_generated_image(monkeypatch):
     """End-to-end through the real graph (ToolNode included, not stubbed)
-    — checks both that pop_pending_image() surfaces what generate_image
+    — checks both that the image_out param surfaces what generate_image
     produced, and that a later turn on the same (checkpointed) thread that
     never calls the tool again does NOT resurface it. That second check is
     the whole reason answer() scopes its scan to messages after the latest
@@ -404,11 +405,43 @@ def test_answer_extracts_a_generated_image(monkeypatch):
     agent_module.build_graph.cache_clear()
 
     try:
-        reply = agent_module.answer("draw me a cat", thread_id="image-test")
+        image_out: dict = {}
+        reply = agent_module.answer("draw me a cat", thread_id="image-test", image_out=image_out)
         assert reply
-        assert agent_module.pop_pending_image() == (b"fake-bytes", "image/jpeg")
+        assert image_out.get("image") == (b"fake-bytes", "image/jpeg")
 
-        agent_module.answer("anything else?", thread_id="image-test")
-        assert agent_module.pop_pending_image() is None
+        image_out2: dict = {}
+        agent_module.answer("anything else?", thread_id="image-test", image_out=image_out2)
+        assert image_out2.get("image") is None
     finally:
         agent_module.build_graph.cache_clear()
+
+
+def test_stream_reply_extracts_a_generated_image(monkeypatch):
+    """Same as test_answer_extracts_a_generated_image but for the
+    streaming path — deliberately calls the real stream_reply()/real
+    LangGraph .stream(), not a mock, and fully drains the generator the
+    way a real caller must. This is the test that was missing when
+    image_out (then a contextvars side channel) shipped: every existing
+    test at the time mocked app.main.stream_reply directly, so nothing
+    ever exercised the real interaction between LangGraph's streaming API
+    and the extraction logic — which is exactly where the bug turned out
+    to be (confirmed in production 2026-09-30: images generated correctly
+    but never reached the user over the streaming web path)."""
+
+    monkeypatch.setattr("app.image_gen.generate", lambda prompt: (b"fake-bytes", "image/jpeg"))
+    stub = _ImageStubLLM()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_stateless_graph.cache_clear()
+
+    from langchain_core.messages import HumanMessage
+
+    try:
+        image_out: dict = {}
+        chunks = list(
+            agent_module.stream_reply([HumanMessage(content="draw me a cat")], image_out=image_out)
+        )
+        assert chunks
+        assert image_out.get("image") == (b"fake-bytes", "image/jpeg")
+    finally:
+        agent_module.build_stateless_graph.cache_clear()
