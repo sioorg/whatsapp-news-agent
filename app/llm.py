@@ -17,6 +17,15 @@ def build_llm() -> BaseChatModel:
             model=settings.groq_model,
             api_key=settings.groq_api_key(),
             temperature=0.2,
+            # The underlying groq SDK already retries 429s automatically,
+            # honoring the exact wait time Groq's error response specifies
+            # (see groq._base_client._calculate_retry_timeout) — no need to
+            # hand-roll that. Its default of 2 wasn't enough for a real
+            # rate-limit hit (needed ~48s to clear; confirmed via a live
+            # 429 on 2026-09-30, ITPM limit on qwen/qwen3.8-27b's free
+            # tier), so raised here rather than left at langchain_groq's
+            # own default.
+            max_retries=5,
         )
 
     if provider == "anthropic":
