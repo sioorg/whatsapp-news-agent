@@ -67,6 +67,13 @@ VOICE_MESSAGES = Counter(
     ["direction", "channel"],
 )
 
+IMAGES_UNDERSTOOD = Counter(
+    "images_understood_total",
+    "Images the user sent for the model to see/describe, by channel — "
+    "the reverse direction of generate_image (which is a tool_calls_total entry).",
+    ["channel"],
+)
+
 RAG_LOOKUPS = Counter(
     "rag_lookups_total",
     "Local knowledge-store lookups, by whether they found anything.",

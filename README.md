@@ -318,6 +318,38 @@ media-send path wired up in this project (trial-tier limitations), so a
 Twilio user who asks for an image just gets the model's text description
 of what it made, not the picture itself.
 
+## Image understanding
+
+The reverse direction: a photo sent *to* the bot (send one on WhatsApp, or
+attach one in the web chat), not one it generates. No new tool, no routing
+change — whichever `LLM_PROVIDER` is configured just gets the image as part
+of the one message, using the model's own native vision (this is why it
+needed no separate vision API or provider: Claude, GPT-4o-class models, and
+most current-generation LLMs already accept an image as part of a message's
+content, the same as text).
+
+Both connectors build a multimodal message the same way, via
+`app.agent._human_message`/langchain-core's standard content blocks
+(`create_text_block`/`create_image_block`) — the one provider-agnostic shape
+both `answer()` (WhatsApp/Twilio) and `stream_reply()` (web, via
+`openai_compat.parse_messages`) ever produce:
+
+- **WhatsApp:** `meta_whatsapp.py parse_inbound` recognizes an inbound
+  `image` message the same way it already handled `audio` — caption (if
+  any) becomes the text, the image id is downloaded in the background task
+  (`app/main.py`, same timing reasoning as voice notes: too slow to do
+  synchronously inside the webhook before Meta's retry timeout). No caption
+  gets a generic `"What's in this image?"` prompt instead of an empty one.
+- **Web:** Open WebUI's own image-attach UI sends an OpenAI-format
+  `image_url` content part (a `data:` URL); `openai_compat.parse_messages`
+  converts it to the same standard content blocks.
+
+**A real, tested constraint:** whichever model is actually vision-capable
+matters — `LLM_PROVIDER=groq`'s current model (`qwen/qwen3.8-27b`) is
+text-only, so switching back to Groq without also changing the model would
+break this feature, not just degrade it. As of 2026-09-30 this project runs
+`LLM_PROVIDER=anthropic` (Claude Sonnet 5, natively multimodal).
+
 ## Setup
 
 ```bash

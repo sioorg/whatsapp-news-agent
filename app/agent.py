@@ -16,6 +16,7 @@ thread_id, which would accumulate one dead row per web message forever in
 CHECKPOINT_DB's file if it went through the checkpointed graph instead).
 """
 
+import base64
 from datetime import date
 from functools import lru_cache
 from typing import Annotated, Iterator, Literal
@@ -24,6 +25,7 @@ import sqlite3
 from pathlib import Path
 
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.content import create_image_block, create_text_block
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import START, StateGraph
@@ -47,6 +49,34 @@ from app.tools import (
 # app.tools.generate_image's (image_bytes, mime_type) — see app.image_gen.generate
 # for why the mime type has to travel with the bytes rather than being assumed.
 ImageArtifact = tuple[bytes, str]
+
+DEFAULT_IMAGE_PROMPT = "What's in this image?"
+
+
+def _human_message(text: str, image: ImageArtifact | None) -> HumanMessage:
+    """Build a HumanMessage, multimodal if an inbound image is attached —
+    the reverse direction of generate_image: the *user's* image, sent to
+    the model to actually see (not a tool call, so there's nothing for the
+    router to gate; this just shapes what goes in the one message).
+
+    Uses langchain-core's standard content blocks (create_text_block/
+    create_image_block), the provider-agnostic format — whichever backend
+    LLM_PROVIDER selects translates these into its own API shape
+    internally. ``text`` defaults to a generic prompt when empty (e.g. an
+    image sent with no caption), so the model always has something to act
+    on rather than an empty instruction alongside the image.
+    """
+
+    if image is None:
+        return HumanMessage(content=text)
+
+    image_bytes, mime_type = image
+    return HumanMessage(
+        content=[
+            create_text_block(text or DEFAULT_IMAGE_PROMPT),
+            create_image_block(base64=base64.b64encode(image_bytes).decode(), mime_type=mime_type),
+        ]
+    )
 
 
 # WhatsApp/Twilio: plaintext, WhatsApp's own *bold*/_italic_ convention (not
@@ -269,12 +299,20 @@ def build_stateless_graph():
 
 
 def answer(
-    text: str, thread_id: str, *, image_out: dict[str, ImageArtifact] | None = None
+    text: str,
+    thread_id: str,
+    *,
+    image_in: ImageArtifact | None = None,
+    image_out: dict[str, ImageArtifact] | None = None,
 ) -> str:
     """Run one user turn through the graph and return the reply text.
 
     ``thread_id`` scopes conversation memory. Pass the sender's WhatsApp
     number so each user gets their own history.
+
+    ``image_in``: an inbound image (e.g. a WhatsApp photo) for the model
+    to see, built into a multimodal message via _human_message — the
+    reverse direction of ``image_out`` below.
 
     ``image_out``: if app.tools.generate_image ran this turn, its artifact
     is written to ``image_out["image"]`` — an explicit output parameter
@@ -293,7 +331,7 @@ def answer(
     """
 
     result = build_graph().invoke(
-        {"messages": [HumanMessage(content=text)]},
+        {"messages": [_human_message(text, image_in)]},
         config={
             "configurable": {"thread_id": thread_id},
             "recursion_limit": 12,

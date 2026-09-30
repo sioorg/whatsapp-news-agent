@@ -105,6 +105,9 @@ digraph WhatsAppNewsAgent {
         tool_node -> call_model [label="ToolMessage"];
 
         graphs_note [label="build_graph() — checkpointed (WhatsApp/Twilio/chat)\nbuild_stateless_graph() — no checkpointer (web; caller resends full history)\nrecursion_limit=12", shape=note, fillcolor="#fff2cc", fontsize=10];
+
+        vision_note [label="Image understanding (reverse of generate_image):\na photo sent TO the bot becomes a multimodal\nHumanMessage — image + text in the same message,\nnot a tool call — via _human_message/\nopenai_compat.parse_messages, using langchain-core's\nstandard content blocks. Needs a vision-capable\nmodel (Claude: yes; qwen3.8-27b on Groq: no).", shape=note, fillcolor="#fff2cc", fontsize=10];
+        vision_note -> call_model [style=dotted, dir=none, constraint=false];
     }
 
     meta_conn -> route_node [label="answer(text, thread_id=wa_id)"];
@@ -166,7 +169,8 @@ digraph WhatsAppNewsAgent {
         fillcolor="#fbf3ee";
         fontsize=13;
 
-        groq [label="Groq API\nLLM_PROVIDER=groq (default)\nGROQ_MODEL=qwen/qwen3.8-27b\n(alt: ANTHROPIC_MODEL=claude-sonnet-5)\n+ Whisper STT, Orpheus TTS", fillcolor="#f9cb9c"];
+        groq [label="Groq API\nWhisper STT, Orpheus TTS\n(voice always uses Groq directly,\nregardless of LLM_PROVIDER)\nGROQ_MODEL=qwen/qwen3.8-27b\n(code default; NOT active for chat\nin production — see Anthropic node)", fillcolor="#f9cb9c"];
+        anthropic_api [label="Anthropic API\nLLM_PROVIDER=anthropic\n— active in production since 2026-09-30\n(switched from Groq: rate-limit +\ntool-calling reliability issues)\nANTHROPIC_MODEL=claude-sonnet-5", fillcolor="#f9cb9c"];
         tavily [label="Tavily Search API\nnews_search (topic=news)\nweb_search (topic=general)", fillcolor="#f9cb9c"];
         openmeteo [label="Open-Meteo API\ngeocoding-api + api.open-meteo.com\nfree, no key", fillcolor="#f9cb9c"];
         meta_graph [label="Meta Graph API v21.0\ngraph.facebook.com\nmessages, media, subscribed_apps", fillcolor="#f9cb9c"];
@@ -174,7 +178,7 @@ digraph WhatsAppNewsAgent {
         openai_images [label="OpenAI Images API\nIMAGE_PROVIDER=openai (opt-in)\ngpt-image-1, paid — returns PNG", fillcolor="#f9cb9c", style="rounded,filled,dashed"];
     }
 
-    call_model -> groq [label="chat + route\nclassification"];
+    call_model -> anthropic_api [label="chat + route\nclassification"];
     voice_mod -> groq [label="audio.transcriptions\naudio.speech"];
     news_tool -> tavily;
     weather_tool -> openmeteo;

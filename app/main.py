@@ -64,6 +64,7 @@ VOICE_ACK_REPLY = "🎙️ Got your voice note, preparing a voice reply…"
 # flight after this long, say so explicitly.
 VOICE_ACK_DELAY_SECONDS = 5
 VOICE_FAILURE_REPLY = "Sorry, I couldn't understand that voice message. Try again, or type instead."
+IMAGE_FAILURE_REPLY = "Sorry, I couldn't load that image. Try sending it again."
 
 
 def _image_markdown(image: tuple[bytes, str]) -> str:
@@ -197,7 +198,10 @@ def _process_message(
     happens here, in the background task, rather than synchronously while
     parsing the webhook). If transcription fails, there's no text to answer
     with, so this replies with a plain explanation and stops rather than
-    calling the agent on empty input.
+    calling the agent on empty input. An inbound image (``image_media_id``)
+    works the same way — downloaded here, passed to answer() as ``image_in``
+    so the model can actually see it — except ``body`` (the caption, which
+    may be empty) is kept as-is rather than overwritten.
 
     ``send_voice``/``send_image`` are only ever passed for Meta (Twilio has
     neither media-send capability in this project). If app.tools.generate_image
@@ -228,12 +232,32 @@ def _process_message(
                 logger.exception("failed to send transcription-failure reply to %s", message.sender)
             return
 
+    inbound_image: tuple[bytes, str] | None = None
+    if message.image_media_id:
+        metrics.IMAGES_UNDERSTOOD.labels(channel=channel).inc()
+        try:
+            with metrics.track_api_call("meta_download"):
+                image_bytes = meta.download_media(message.image_media_id)
+            inbound_image = (image_bytes, message.image_mime_type or "image/jpeg")
+        except Exception:
+            logger.exception("failed to download image from %s", message.sender)
+            try:
+                send_text(message.sender, IMAGE_FAILURE_REPLY)
+            except Exception:
+                logger.exception("failed to send image-download-failure reply to %s", message.sender)
+            return
+
     logger.info("handling message from %s: %s", message.sender, message.body[:80])
 
     image_holder: dict = {}
     try:
         with metrics.TURN_DURATION.labels(channel=channel).time():
-            reply = answer(message.body, thread_id=message.sender, image_out=image_holder)
+            reply = answer(
+                message.body,
+                thread_id=message.sender,
+                image_in=inbound_image,
+                image_out=image_holder,
+            )
     except Exception:
         logger.exception("agent failed for %s", message.sender)
         metrics.AGENT_ERRORS.labels(channel=channel).inc()

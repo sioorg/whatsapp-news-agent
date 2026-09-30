@@ -11,6 +11,7 @@ build_stateless_graph/stream_reply for this path rather than the
 checkpointed one — see that module's docstring for the reasoning.
 """
 
+import base64
 import json
 import logging
 import time
@@ -18,8 +19,10 @@ import uuid
 from typing import Iterator
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages.content import create_image_block, create_text_block
 
 from app import metrics
+from app.agent import DEFAULT_IMAGE_PROMPT
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -72,6 +75,46 @@ def _content_text(content) -> str:
     return content or ""
 
 
+def _user_message(content) -> HumanMessage:
+    """Build a HumanMessage from a user turn's content — a plain string,
+    or a list of {"type": "text"|"image_url", ...} parts, which is what
+    Open WebUI sends when someone attaches an image in the web chat
+    (the reverse direction of generate_image's own images). Only the
+    first image part is used if more than one is sent — same
+    one-image-per-turn assumption the WhatsApp side makes (see
+    app.connectors.meta_whatsapp.parse_inbound).
+
+    Rebuilds as langchain-core's own standard content blocks rather than
+    passing OpenAI's shape straight through, so app.agent._human_message's
+    provider-agnostic format is the only one either connector ever
+    produces.
+    """
+
+    if isinstance(content, str) or not isinstance(content, list):
+        return HumanMessage(content=_content_text(content))
+
+    text_parts: list[str] = []
+    image_block = None
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            text_parts.append(part.get("text", ""))
+        elif part.get("type") == "image_url" and image_block is None:
+            url = part.get("image_url", {}).get("url", "")
+            if url.startswith("data:"):
+                header, _, encoded = url.partition(",")
+                mime_type = header.removeprefix("data:").split(";")[0] or "image/jpeg"
+                image_block = create_image_block(base64=encoded, mime_type=mime_type)
+            elif url:
+                image_block = create_image_block(url=url)
+
+    text = "".join(text_parts)
+    if image_block is None:
+        return HumanMessage(content=text)
+    return HumanMessage(content=[create_text_block(text or DEFAULT_IMAGE_PROMPT), image_block])
+
+
 def parse_messages(body: dict) -> list[AnyMessage]:
     """Convert an OpenAI chat-completions request body into LangChain
     messages.
@@ -87,11 +130,10 @@ def parse_messages(body: dict) -> list[AnyMessage]:
     messages: list[AnyMessage] = []
     for m in body.get("messages", []):
         role = m.get("role")
-        text = _content_text(m.get("content"))
         if role == "user":
-            messages.append(HumanMessage(content=text))
+            messages.append(_user_message(m.get("content")))
         elif role == "assistant":
-            messages.append(AIMessage(content=text))
+            messages.append(AIMessage(content=_content_text(m.get("content"))))
     return messages
 
 

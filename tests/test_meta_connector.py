@@ -134,6 +134,77 @@ def test_ignores_an_audio_message_with_no_media_id():
     assert meta.parse_inbound(payload) == []
 
 
+def test_parses_an_image_message_with_a_caption():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "contacts": [{"profile": {"name": "Sio"}, "wa_id": "919902245562"}],
+                            "messages": [
+                                {
+                                    "from": "919902245562",
+                                    "type": "image",
+                                    "image": {
+                                        "id": "IMGMEDIA1",
+                                        "mime_type": "image/jpeg",
+                                        "caption": "what breed is this?",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = meta.parse_inbound(payload)
+
+    assert len(messages) == 1
+    assert messages[0].sender == "919902245562"
+    assert messages[0].body == "what breed is this?"
+    assert messages[0].image_media_id == "IMGMEDIA1"
+    assert messages[0].image_mime_type == "image/jpeg"
+    assert messages[0].profile_name == "Sio"
+
+
+def test_parses_an_image_message_with_no_caption():
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "919902245562",
+                                    "type": "image",
+                                    "image": {"id": "IMGMEDIA2", "mime_type": "image/jpeg"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    messages = meta.parse_inbound(payload)
+
+    assert messages[0].body == ""
+    assert messages[0].image_media_id == "IMGMEDIA2"
+
+
+def test_ignores_an_image_message_with_no_media_id():
+    payload = {
+        "entry": [{"changes": [{"value": {"messages": [{"from": "91", "type": "image", "image": {}}]}}]}]
+    }
+
+    assert meta.parse_inbound(payload) == []
+
+
 def test_download_media_fetches_the_url_then_the_bytes(monkeypatch):
     """Two requests, both bearer-authenticated: resolve the media id to a
     CDN URL, then download from it — verified against the real API before

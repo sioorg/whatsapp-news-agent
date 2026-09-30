@@ -27,6 +27,16 @@ class InboundMessage:
     # everything else already runs in, filling ``body`` in before calling
     # the agent.
     audio_media_id: str | None = None
+    # Set instead of/alongside ``body`` for an inbound image (Meta only,
+    # for now): ``body`` holds the caption if one was sent (may be empty),
+    # downloading the image bytes is a real network round trip, same
+    # reasoning and same place (main.py's _handle_message) as
+    # audio_media_id above.
+    image_media_id: str | None = None
+    # From the webhook payload's own mime_type field — never assumed, since
+    # the model needs the real value to correctly interpret base64 image
+    # data (see app.agent's _human_message).
+    image_mime_type: str = ""
     # Provider's id for this inbound message (Meta's ``wamid…``). Needed to
     # show a typing indicator, which is attached to the message being
     # answered.

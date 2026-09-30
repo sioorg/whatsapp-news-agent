@@ -445,3 +445,81 @@ def test_stream_reply_extracts_a_generated_image(monkeypatch):
         assert image_out.get("image") == (b"fake-bytes", "image/jpeg")
     finally:
         agent_module.build_stateless_graph.cache_clear()
+
+
+# --- Image understanding (the reverse direction: images sent TO the bot) ---
+
+
+def test_human_message_is_plain_text_without_an_image():
+    msg = agent_module._human_message("hello", None)
+
+    assert msg.content == "hello"
+
+
+def test_human_message_builds_multimodal_content_with_an_image():
+    msg = agent_module._human_message("what is this", (b"fake-bytes", "image/png"))
+
+    blocks = msg.content_blocks
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == "what is this"
+    assert blocks[1]["type"] == "image"
+    assert blocks[1]["mime_type"] == "image/png"
+    import base64
+
+    assert blocks[1]["base64"] == base64.b64encode(b"fake-bytes").decode()
+
+
+def test_human_message_defaults_the_prompt_for_a_captionless_image():
+    msg = agent_module._human_message("", (b"fake-bytes", "image/png"))
+
+    assert msg.content_blocks[0]["text"] == agent_module.DEFAULT_IMAGE_PROMPT
+
+
+def test_answer_passes_the_image_to_the_llm(monkeypatch):
+    """End-to-end through the real graph: a stub LLM records the actual
+    messages it was invoked with, confirming the image genuinely reaches
+    the model as multimodal content — not just that _human_message builds
+    the right shape in isolation."""
+
+    monkeypatch.setattr(settings, "checkpoint_db", "")
+
+    class _RecordingStub:
+        def __init__(self):
+            self.seen_messages = None
+
+        def with_structured_output(self, schema):
+            class _Router:
+                def invoke(self, messages):
+                    return schema(choice="both")
+
+            return _Router()
+
+        def bind_tools(self, tools):
+            outer = self
+
+            class _Bound:
+                def invoke(self, messages):
+                    outer.seen_messages = messages
+                    return AIMessage(content="it's a cat")
+
+            return _Bound()
+
+    stub = _RecordingStub()
+    monkeypatch.setattr(agent_module, "build_llm", lambda: stub)
+    agent_module.build_graph.cache_clear()
+
+    try:
+        reply = agent_module.answer(
+            "what is this",
+            thread_id="vision-test",
+            image_in=(b"fake-bytes", "image/jpeg"),
+        )
+        assert reply == "it's a cat"
+
+        human = stub.seen_messages[-1]
+        blocks = human.content_blocks
+        assert blocks[0]["text"] == "what is this"
+        assert blocks[1]["type"] == "image"
+        assert blocks[1]["mime_type"] == "image/jpeg"
+    finally:
+        agent_module.build_graph.cache_clear()

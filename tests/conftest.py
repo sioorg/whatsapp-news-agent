@@ -116,3 +116,43 @@ def meta_audio_payload() -> dict:
             }
         ],
     }
+
+
+@pytest.fixture
+def meta_image_payload() -> dict:
+    """A realistically shaped inbound image message (with a caption) from
+    the Cloud API."""
+
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "id": "WABA_ID",
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "messaging_product": "whatsapp",
+                            "metadata": {"phone_number_id": "1234567890"},
+                            "contacts": [
+                                {"profile": {"name": "Sio"}, "wa_id": "919902245562"}
+                            ],
+                            "messages": [
+                                {
+                                    "from": "919902245562",
+                                    "id": "wamid.IMAGE",
+                                    "timestamp": "1700000000",
+                                    "type": "image",
+                                    "image": {
+                                        "id": "IMGMEDIA1",
+                                        "mime_type": "image/jpeg",
+                                        "caption": "what breed is this?",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        ],
+    }

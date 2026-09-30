@@ -189,16 +189,51 @@ def test_a_failed_voice_reply_falls_back_to_text(client, meta_audio_payload):
     assert sent_text == ["the real answer"]
 
 
+# --- Meta inbound image understanding ---------------------------------------
+
+
+def test_inbound_image_is_downloaded_and_passed_to_the_agent(client, meta_image_payload):
+    """The reverse direction of image generation: a photo the user sends,
+    not one the bot makes. Confirms the caption reaches answer() as text
+    and the downloaded bytes reach it as image_in, not just that
+    something gets sent back."""
+
+    with patch("app.connectors.meta_whatsapp.download_media", return_value=b"raw-image-bytes") as download:
+        with patch("app.connectors.meta_whatsapp.send_message"):
+            with patch("app.main.answer", return_value="looks like a tabby") as answer:
+                response = client.post("/webhook/meta", json=meta_image_payload)
+
+    assert response.status_code == 200
+    download.assert_called_once_with("IMGMEDIA1")
+    assert answer.call_args.args[0] == "what breed is this?"
+    assert answer.call_args.kwargs["image_in"] == (b"raw-image-bytes", "image/jpeg")
+
+
+def test_a_failed_image_download_gets_a_text_explanation_not_silence(client, meta_image_payload):
+    sent_text = []
+
+    with patch("app.connectors.meta_whatsapp.download_media", side_effect=RuntimeError("meta down")):
+        with patch(
+            "app.connectors.meta_whatsapp.send_message",
+            lambda to, body: sent_text.append(body),
+        ):
+            response = client.post("/webhook/meta", json=meta_image_payload)
+
+    assert response.status_code == 200
+    assert len(sent_text) == 1
+    assert "couldn't load" in sent_text[0].lower()
+
+
 # --- Meta inbound image generation ------------------------------------------
 
 
-def _fake_answer_with_image(text, thread_id, image_out=None):
+def _fake_answer_with_image(text, thread_id, image_in=None, image_out=None):
     """Stands in for app.main.answer: matches its real (text, thread_id,
-    image_out=...) signature, so the fake actually exercises the same
-    "populate the caller's dict" contract the real function does — a
-    plain return_value= mock can't do that, and that gap is exactly what
-    let the underlying streaming bug (see app/agent.py's docstrings) ship
-    unnoticed in the first place."""
+    image_in=..., image_out=...) signature, so the fake actually exercises
+    the same "populate the caller's dict" contract the real function does
+    — a plain return_value= mock can't do that, and that gap is exactly
+    what let the underlying streaming bug (see app/agent.py's docstrings)
+    ship unnoticed in the first place."""
 
     if image_out is not None:
         image_out["image"] = (b"fake-bytes", "image/jpeg")

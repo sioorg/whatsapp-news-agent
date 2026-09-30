@@ -93,6 +93,67 @@ def test_parse_messages_handles_an_empty_list():
     assert oc.parse_messages({"messages": []}) == []
 
 
+def test_parse_messages_builds_a_multimodal_message_from_a_data_url_image():
+    messages = oc.parse_messages(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is this"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,ZmFrZQ=="}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    blocks = messages[0].content_blocks
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == "what is this"
+    assert blocks[1]["type"] == "image"
+    assert blocks[1]["base64"] == "ZmFrZQ=="
+    assert blocks[1]["mime_type"] == "image/png"
+
+
+def test_parse_messages_defaults_the_prompt_for_a_captionless_image():
+    messages = oc.parse_messages(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,eA=="}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    blocks = messages[0].content_blocks
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == oc.DEFAULT_IMAGE_PROMPT
+
+
+def test_parse_messages_uses_a_plain_url_image_as_is():
+    messages = oc.parse_messages(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "https://example.com/cat.jpg"}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    blocks = messages[0].content_blocks
+    assert blocks[1]["type"] == "image"
+    assert blocks[1]["url"] == "https://example.com/cat.jpg"
+
+
 def test_stream_sse_wraps_text_chunks_as_openai_events():
     events = list(oc.stream_sse(iter(["Hel", "lo"])))
 

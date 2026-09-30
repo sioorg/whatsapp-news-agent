@@ -105,6 +105,26 @@ def parse_inbound(payload: dict) -> list[InboundMessage]:
                         )
                     )
 
+                elif msg_type == "image":
+                    image = message.get("image", {})
+                    media_id = image.get("id")
+                    if not media_id:
+                        continue
+
+                    messages.append(
+                        InboundMessage(
+                            sender=sender,
+                            # A caption is optional — main.py/app.agent
+                            # default to a generic "what's in this image?"
+                            # prompt when it's empty.
+                            body=image.get("caption", "").strip(),
+                            image_media_id=media_id,
+                            image_mime_type=image.get("mime_type", "image/jpeg"),
+                            profile_name=names.get(sender, ""),
+                            message_id=message.get("id"),
+                        )
+                    )
+
                 else:
                     logger.info("ignoring %s message", msg_type)
 
